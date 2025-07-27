@@ -8,7 +8,8 @@ from .chunking_strategies import ChunkingManager
 from .vector_databases import VectorDatabaseFactory
 from .search_strategies import SearchManager
 from .config import VECTOR_DB_CONFIGS, CHUNKING_STRATEGIES, SEARCH_STRATEGIES
-
+import tempfile
+import fitz  # PyMuPDF
 logger = logging.getLogger(__name__)
 
 class RAGPipeline:
@@ -23,56 +24,51 @@ class RAGPipeline:
         self.chunks = []
         self.pipeline_stats = {}
     
-    def extract_text_from_pdf(file) -> str:
-        """Extract text from a PDF file object using PyMuPDF."""
+    def extract_text_from_pdf(self, file) -> str:
         try:
-            file_bytes = file.read()
-            file.seek(0)  # reset stream pointer
-            doc = fitz.open(stream=file_bytes, filetype="pdf")
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
+                tmp_file.write(file.read())
+                tmp_path = tmp_file.name
+            doc = fitz.open(tmp_path)
             text = ""
-            for page in doc:
-                text += page.get_text()
+            for i, page in enumerate(doc):
+                page_text = page.get_text()
+                print(f"[DEBUG] Page {i+1} of {file.name}: {len(page_text)} chars")
+                text += page_text
             return text
         except Exception as e:
-            logger.error(f"Failed to extract text from {getattr(file, 'name', 'unnamed')}: {e}")
+            print(f"[ERROR] Could not extract from {file.name}: {e}")
             return ""
-
+        finally:
+            file.seek(0)  # always reset
 
     def process_documents(self, uploaded_files, chunking_strategy: str = "recursive", 
                         **chunking_kwargs) -> Dict[str, Any]:
-        """Process uploaded PDF documents."""
         start_time = time.time()
+        print(f"[INFO] Starting PDF processing: {len(uploaded_files)} files")
+
         processed_documents = []
         skipped_files = []
 
-        logger.info(f"Processing {len(uploaded_files)} uploaded files...")
-
-        # 1. Extract text from PDFs
         for file in uploaded_files:
-            try:
-                text = self.extract_text_from_pdf(file)
-                if text.strip():
-                    processed_documents.append({"text": text, "name": file.name})
-                else:
-                    skipped_files.append((file.name, "No extractable text"))
-            except Exception as e:
-                skipped_files.append((file.name, str(e)))
+            print(f"[INFO] Processing {file.name}")
+            text = self.extract_text_from_pdf(file)
+            if text.strip():
+                processed_documents.append({"text": text, "name": file.name})
+                print(f"[SUCCESS] {file.name}: extracted {len(text)} characters")
+            else:
+                skipped_files.append(file.name)
+                print(f"[WARNING] Skipped {file.name}: no extractable text")
 
         if not processed_documents:
+            print(f"[FAIL] No documents processed. Skipped files: {skipped_files}")
             return {"error": "No documents were successfully processed"}
 
-        # 2. Chunk documents
-        logger.info(f"Chunking {len(processed_documents)} documents using '{chunking_strategy}' strategy...")
-        chunks = self.chunking_manager.chunk_documents(
-            processed_documents,
-            chunking_strategy,
-            **chunking_kwargs
-        )
-
-        processing_time = time.time() - start_time
+        print(f"[INFO] Chunking {len(processed_documents)} documents...")
+        chunks = self.chunking_manager.chunk_documents(processed_documents, chunking_strategy, **chunking_kwargs)
         chunk_stats = self.chunking_manager.get_chunking_stats(chunks)
 
-        # Save for downstream usage
+        processing_time = time.time() - start_time
         self.processed_documents = processed_documents
         self.chunks = chunks
         self.pipeline_stats["processing"] = {
@@ -82,13 +78,14 @@ class RAGPipeline:
             **chunk_stats
         }
 
+        print(f"[DONE] Processed {len(processed_documents)} documents into {len(chunks)} chunks")
         return {
             "success": True,
             "num_documents": len(processed_documents),
             "num_chunks": len(chunks),
             "processing_time": processing_time,
             "chunk_stats": chunk_stats,
-            "skipped_files": skipped_files  # <-- for frontend if you want to show it
+            "skipped_files": skipped_files
         }
     
     def setup_vector_database(self, db_type: str, index_name: str = "rag_index", 
