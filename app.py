@@ -182,7 +182,7 @@ def process_documents_section(config: Dict[str, Any]):
 
 def setup_database_section(config: Dict[str, Any]):
     """Handle vector database setup section."""
-    st.header("🗄️ Vector Database Setup")
+    st.header("Vector Database Setup")
     
     if not st.session_state.documents_processed:
         st.warning("Please process documents first before setting up the database.")
@@ -295,8 +295,8 @@ def comparison_section():
         st.info("Run some experiments to see comparisons!")
         return
     
-    # Create tabs for different comparisons
-    tab1, tab2, tab3, tab4 = st.tabs(["📈 Performance"])
+    # Create tabs for different comparisons - Fix: unpack the tuple
+    tab1, = st.tabs(["Performance"])  # Note the comma after tab1
     
     with tab1:
         # Performance comparison table
@@ -315,7 +315,7 @@ def comparison_section():
             with col2:
                 acc_chart = st.session_state.comparison_analyzer.create_accuracy_chart()
                 st.plotly_chart(acc_chart, use_container_width=True)
-    
+
 
 def main():
     """Main application function."""
