@@ -20,8 +20,7 @@ logger = logging.getLogger(__name__)
 
 # Page configuration
 st.set_page_config(
-    page_title="Agentic RAG Pipeline",
-    page_icon="🤖",
+    page_title="RAG Pipeline",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -78,10 +77,10 @@ def initialize_session_state():
 
 def render_sidebar():
     """Render the sidebar with configuration options."""
-    st.sidebar.header("⚙️ Configuration")
+    st.sidebar.header("Configuration")
     
     # Document Upload
-    st.sidebar.subheader("📁 Document Upload")
+    st.sidebar.subheader("Document Upload")
     uploaded_files = st.sidebar.file_uploader(
         "Upload PDF files",
         type=['pdf'],
@@ -90,7 +89,7 @@ def render_sidebar():
     )
     
     # Chunking Strategy
-    st.sidebar.subheader("✂️ Chunking Strategy")
+    st.sidebar.subheader("Chunking Strategy")
     chunking_strategy = st.sidebar.selectbox(
         "Select chunking strategy",
         options=list(CHUNKING_STRATEGIES.keys()),
@@ -104,7 +103,7 @@ def render_sidebar():
         chunk_overlap = st.slider("Chunk Overlap", 0, 500, 200)
     
     # Vector Database
-    st.sidebar.subheader("🗄️ Vector Database")
+    st.sidebar.subheader("Vector Database")
     vector_db = st.sidebar.selectbox(
         "Select vector database",
         options=list(VECTOR_DB_CONFIGS.keys()),
@@ -113,7 +112,7 @@ def render_sidebar():
     )
     
     # Search Strategy
-    st.sidebar.subheader("🔍 Search Strategy")
+    st.sidebar.subheader("Search Strategy")
     search_strategy = st.sidebar.selectbox(
         "Select search strategy",
         options=list(SEARCH_STRATEGIES.keys()),
@@ -142,7 +141,7 @@ def render_sidebar():
 
 def process_documents_section(config: Dict[str, Any]):
     """Handle document processing section."""
-    st.header("📄 Document Processing")
+    st.header("Document Processing")
     
     if config['uploaded_files']:
         col1, col2 = st.columns([2, 1])
@@ -153,7 +152,7 @@ def process_documents_section(config: Dict[str, Any]):
                 st.write(f"- {file.name}")
         
         with col2:
-            if st.button("🚀 Process Documents", type="primary"):
+            if st.button("Process Documents", type="primary"):
                 with st.spinner("Processing documents..."):
                     result = st.session_state.rag_pipeline.process_documents(
                         config['uploaded_files'],
@@ -219,7 +218,7 @@ def setup_database_section(config: Dict[str, Any]):
 
 def search_section(config: Dict[str, Any]):
     """Handle document search section."""
-    st.header("🔍 Document Search")
+    st.header("Document Search")
     
     if not st.session_state.database_setup:
         st.warning("Please setup the vector database first before searching.")
@@ -236,7 +235,7 @@ def search_section(config: Dict[str, Any]):
         col1, col2 = st.columns([3, 1])
         
         with col2:
-            if st.button("🔍 Search", type="primary"):
+            if st.button("Search", type="primary"):
                 with st.spinner("Searching documents..."):
                     search_kwargs = {}
                     if config['search_strategy'] == "hybrid":
@@ -290,14 +289,14 @@ def search_section(config: Dict[str, Any]):
 
 def comparison_section():
     """Handle strategy comparison section."""
-    st.header("📊 Strategy Comparison")
+    st.header("Strategy Comparison")
     
     if not st.session_state.experiment_results:
         st.info("Run some experiments to see comparisons!")
         return
     
     # Create tabs for different comparisons
-    tab1, tab2, tab3, tab4 = st.tabs(["📈 Performance", "🎯 Strategy Overview", "🗄️ Database Features", "📋 Export"])
+    tab1, tab2, tab3, tab4 = st.tabs(["📈 Performance"])
     
     with tab1:
         # Performance comparison table
@@ -317,29 +316,6 @@ def comparison_section():
                 acc_chart = st.session_state.comparison_analyzer.create_accuracy_chart()
                 st.plotly_chart(acc_chart, use_container_width=True)
     
-    with tab2:
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.subheader("Chunking Strategies")
-            chunking_df = st.session_state.comparison_analyzer.generate_chunking_comparison()
-            st.dataframe(chunking_df, use_container_width=True)
-        
-        with col2:
-            st.subheader("Search Strategies")
-            search_df = st.session_state.comparison_analyzer.generate_search_comparison()
-            st.dataframe(search_df, use_container_width=True)
-    
-    with tab3:
-        st.subheader("Vector Database Features")
-        db_df = st.session_state.comparison_analyzer.generate_database_comparison()
-        st.dataframe(db_df, use_container_width=True)
-    
-    with tab4:
-        st.subheader("Export Results")
-        if st.button("📁 Export Comparison Report"):
-            result = st.session_state.comparison_analyzer.export_comparison_report("rag_comparison")
-            st.success(result)
 
 def main():
     """Main application function."""
@@ -347,7 +323,7 @@ def main():
     initialize_session_state()
     
     # Main header
-    st.markdown('<h1 class="main-header">🤖 Agentic RAG Pipeline</h1>', unsafe_allow_html=True)
+    st.markdown('<h1 class="main-header">RAG Pipeline</h1>', unsafe_allow_html=True)
     st.markdown("---")
     
     # Render sidebar and get configuration
