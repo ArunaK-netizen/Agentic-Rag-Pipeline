@@ -76,17 +76,31 @@ def initialize_session_state():
         st.session_state.database_setup = False
 
 def render_sidebar():
-    """Render the sidebar with configuration options."""
+"""Render the sidebar with configuration options."""
     st.sidebar.header("Configuration")
-    
-    # Document Upload
-    st.sidebar.subheader("Document Upload")
-    uploaded_files = st.sidebar.file_uploader(
-        "Upload PDF files",
-        type=['pdf'],
-        accept_multiple_files=True,
-        help="Upload one or more PDF files to process"
-    )
+
+    st.sidebar.subheader("Document Source")
+    root_directory = "bpcl data"  # change as needed
+
+    uploaded_files = []
+    filenames = []
+
+    if os.path.exists(root_directory):
+        for dirpath, _, files in os.walk(root_directory):
+            for file in files:
+                if file.lower().endswith(".pdf"):
+                    full_path = os.path.join(dirpath, file)
+                    with open(full_path, "rb") as f:
+                        uploaded_files.append(io.BytesIO(f.read()))
+                        filenames.append(file)
+
+        for f, name in zip(uploaded_files, filenames):
+            f.name = name  # mimic UploadedFile objects
+
+        st.sidebar.success(f"Loaded {len(uploaded_files)} PDFs from `{root_directory}` and subfolders")
+    else:
+        st.sidebar.error(f"Directory `{root_directory}` not found.")
+
     
     # Chunking Strategy
     st.sidebar.subheader("Chunking Strategy")
