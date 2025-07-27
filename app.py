@@ -173,6 +173,7 @@ def process_documents_section(config: Dict[str, Any]):
             st.info(f"Uploaded {len(config['uploaded_files'])} PDF file(s)")
             for file in config['uploaded_files']:
                 st.write(f"- {file.name}")
+
         
         with col2:
             if st.button("Process Documents", type="primary"):
