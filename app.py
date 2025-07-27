@@ -6,7 +6,7 @@ import logging
 import sys
 import os
 from typing import Dict, Any, List
-
+import io
 # Add src directory to path
 sys.path.append(os.path.join(os.path.dirname(__file__), 'src'))
 
@@ -76,14 +76,13 @@ def initialize_session_state():
         st.session_state.database_setup = False
 
 def render_sidebar():
-"""Render the sidebar with configuration options."""
     st.sidebar.header("Configuration")
 
     st.sidebar.subheader("Document Source")
-    root_directory = "bpcl data"  # change as needed
-
+    root_directory = "bpcl data"
     uploaded_files = []
     filenames = []
+    total_size_mb = 0
 
     if os.path.exists(root_directory):
         for dirpath, _, files in os.walk(root_directory):
@@ -91,13 +90,23 @@ def render_sidebar():
                 if file.lower().endswith(".pdf"):
                     full_path = os.path.join(dirpath, file)
                     with open(full_path, "rb") as f:
-                        uploaded_files.append(io.BytesIO(f.read()))
-                        filenames.append(file)
+                        file_bytes = f.read()
+                        uploaded_files.append(io.BytesIO(file_bytes))
+                        filenames.append(os.path.relpath(full_path, root_directory))  # relative path
+                        total_size_mb += len(file_bytes) / (1024 * 1024)
 
+        # Attach names to mimic UploadedFile
         for f, name in zip(uploaded_files, filenames):
-            f.name = name  # mimic UploadedFile objects
+            f.name = name
 
-        st.sidebar.success(f"Loaded {len(uploaded_files)} PDFs from `{root_directory}` and subfolders")
+        st.sidebar.success(f"{len(uploaded_files)} PDFs loaded from `{root_directory}` ({total_size_mb:.2f} MB)")
+        
+        # Collapsible file preview (first 5 only)
+        with st.sidebar.expander("Preview Loaded Files"):
+            for name in filenames[:5]:
+                st.write(f"• {name}")
+            if len(filenames) > 5:
+                st.write(f"... and {len(filenames) - 5} more")
     else:
         st.sidebar.error(f"Directory `{root_directory}` not found.")
 
