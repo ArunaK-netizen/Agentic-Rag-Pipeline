@@ -8,8 +8,12 @@ from .chunking_strategies import ChunkingManager
 from .vector_databases import VectorDatabaseFactory
 from .search_strategies import SearchManager
 from .config import VECTOR_DB_CONFIGS, CHUNKING_STRATEGIES, SEARCH_STRATEGIES
+from dotenv import load_dotenv
+import os
 import tempfile
-import fitz  # PyMuPDF
+import fitz  
+import google.generativeai
+
 logger = logging.getLogger(__name__)
 
 class RAGPipeline:
@@ -195,7 +199,7 @@ class RAGPipeline:
             }
         }
     
-    def reset_pipeline(self):
+    def reset_pipeline(self):  
         """Reset the pipeline state."""
         if self.vector_db:
             try:
@@ -209,3 +213,43 @@ class RAGPipeline:
         self.pipeline_stats = {}
         
         logger.info("Pipeline reset successfully")
+        
+        
+    def generate_answer_with_gemini(self, query: str, search_results: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        Generate an answer using Gemini Pro LLM based on retrieved document chunks.
+        Args:
+            query (str): The user's question.
+            search_results (List[Dict[str, Any]]): Retrieved chunks from the vector database.
+        Returns:
+            Dict[str, Any]: {"success": True, "answer": ...} or {"error": ...}
+        """
+        try:
+            # Load Gemini API key from .env
+            load_dotenv()
+            api_key = os.getenv("GEMINI_API_KEY")
+            if not api_key:
+                logger.error("GEMINI_API_KEY not found in environment.")
+                return {"error": "GEMINI_API_KEY not set in .env file."}
+            google.generativeai.configure(api_key=api_key)
+
+            # Concatenate retrieved document texts
+            context = "\n\n".join([chunk.get("text", "") for chunk in search_results if chunk.get("text")])
+
+            # Build prompt
+            prompt = (
+                "You are an expert assistant. Use the following context from documents to answer the user's question.\n\n"
+                f"Context:\n{context}\n\n"
+                f"Question: {query}\n\n"
+                "Answer:"
+            )
+
+            # Generate answer using Gemini Pro
+            model = google.generativeai.GenerativeModel("gemini-2.5-flash")
+            response = model.generate_content(prompt)
+            answer = response.text if hasattr(response, "text") else str(response)
+
+            return {"success": True, "answer": answer.strip()}
+        except Exception as e:
+            logger.error(f"Error generating answer with Gemini: {e}")
+            return {"error": str(e)}

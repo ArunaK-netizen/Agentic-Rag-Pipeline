@@ -328,17 +328,52 @@ def comparison_section():
         st.subheader("Performance Comparison")
         st.dataframe(comparison_df, use_container_width=True)
         
-        # Performance charts
-        if len(comparison_df) > 0:
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                perf_chart = st.session_state.comparison_analyzer.create_performance_chart()
-                st.plotly_chart(perf_chart, use_container_width=True)
-            
-            with col2:
-                acc_chart = st.session_state.comparison_analyzer.create_accuracy_chart()
-                st.plotly_chart(acc_chart, use_container_width=True)
+
+def gemini_chat_section(config: Dict[str, Any]):
+    """Section for LLM-powered Q&A using Gemini Pro."""
+    st.header("💬 Gemini LLM Chatbot (Ask Questions About Your Documents)")
+
+    if not st.session_state.database_setup:
+        st.warning("Please setup the vector database first before chatting with Gemini.")
+        return
+
+    # User input for chatbot
+    user_query = st.text_input(
+        "Ask a question to Gemini about your documents:",
+        placeholder="e.g., Summarize the main findings from the documents.",
+        key="gemini_chat_query"
+    )
+
+    if user_query:
+        if st.button("Get Gemini Answer", key="gemini_chat_button"):
+            with st.spinner("Retrieving relevant context and generating answer with Gemini..."):
+                # Retrieve top-k relevant chunks
+                search_kwargs = {}
+                if config['search_strategy'] == "hybrid":
+                    search_kwargs['alpha'] = config['alpha']
+
+                search_result = st.session_state.rag_pipeline.search_documents(
+                    user_query,
+                    config['search_strategy'],
+                    config['top_k'],
+                    **search_kwargs
+                )
+
+                if not search_result.get("success"):
+                    st.error(f"Retrieval error: {search_result.get('error')}")
+                    return
+
+                # Generate answer with Gemini
+                gemini_result = st.session_state.rag_pipeline.generate_answer_with_gemini(
+                    user_query,
+                    search_result["results"]
+                )
+
+                if gemini_result.get("success"):
+                    st.success("Gemini's Answer:")
+                    st.markdown(f"> {gemini_result['answer']}")
+                else:
+                    st.error(f"Gemini error: {gemini_result.get('error')}")
 
 
 def main():
@@ -361,6 +396,9 @@ def main():
     st.markdown("---")
     
     search_section(config)
+    st.markdown("---")
+    
+    gemini_chat_section(config)
     st.markdown("---")
     
     comparison_section()
