@@ -98,6 +98,7 @@ def render_sidebar():
         # Attach names to mimic UploadedFile
         for f, name in zip(uploaded_files, filenames):
             f.name = name
+            f.type = "application/pdf"  # Set MIME type for PDF
 
         st.sidebar.success(f"{len(uploaded_files)} PDFs loaded from `{root_directory}` ({total_size_mb:.2f} MB)")
         
