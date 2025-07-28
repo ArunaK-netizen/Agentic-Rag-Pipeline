@@ -240,7 +240,6 @@ def setup_database_section(config: Dict[str, Any]):
             else:
                 st.error(f"Error setting up database: {result.get('error')}")
 
-def search_section(config: Dict[str, Any]):
     """Handle document search section."""
     st.header("Document Search")
     
@@ -311,7 +310,6 @@ def search_section(config: Dict[str, Any]):
                 else:
                     st.error(f"Search error: {result.get('error')}")
 
-def comparison_section():
     """Handle strategy comparison section."""
     st.header("Strategy Comparison")
     
@@ -394,17 +392,13 @@ def main():
     
     setup_database_section(config)
     st.markdown("---")
-    
-    search_section(config)
-    st.markdown("---")
+
     
     gemini_chat_section(config)
     st.markdown("---")
     
-    comparison_section()
     
     # Footer
-    st.markdown("---")
     st.markdown(
         """
         <div style='text-align: center; color: #666;'>
