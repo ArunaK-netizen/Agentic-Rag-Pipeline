@@ -1,5 +1,3 @@
-"""Main Streamlit application for the RAG pipeline."""
-
 import streamlit as st
 import pandas as pd
 import logging
@@ -79,39 +77,30 @@ def render_sidebar():
     st.sidebar.header("Configuration")
 
     st.sidebar.subheader("Document Source")
-    root_directory = "bpcl data"
-    uploaded_files = []
+    # --- Changed: Use Streamlit file uploader instead of fixed root directory ---
+    uploaded_files = st.sidebar.file_uploader(
+        "Upload PDF files",
+        type=["pdf"],
+        accept_multiple_files=True,
+        help="Upload one or more PDF files to process"
+    )
     filenames = []
     total_size_mb = 0
 
-    if os.path.exists(root_directory):
-        for dirpath, _, files in os.walk(root_directory):
-            for file in files:
-                if file.lower().endswith(".pdf"):
-                    full_path = os.path.join(dirpath, file)
-                    with open(full_path, "rb") as f:
-                        file_bytes = f.read()
-                        uploaded_files.append(io.BytesIO(file_bytes))
-                        filenames.append(os.path.relpath(full_path, root_directory))  # relative path
-                        total_size_mb += len(file_bytes) / (1024 * 1024)
-
-        # Attach names to mimic UploadedFile
-        for f, name in zip(uploaded_files, filenames):
-            f.name = name
-            f.type = "application/pdf"  # Set MIME type for PDF
-
-        st.sidebar.success(f"{len(uploaded_files)} PDFs loaded from `{root_directory}` ({total_size_mb:.2f} MB)")
-        
+    if uploaded_files:
+        for f in uploaded_files:
+            filenames.append(f.name)
+            total_size_mb += f.size / (1024 * 1024)
+        st.sidebar.success(f"{len(uploaded_files)} PDFs uploaded ({total_size_mb:.2f} MB)")
         # Collapsible file preview (first 5 only)
-        with st.sidebar.expander("Preview Loaded Files"):
+        with st.sidebar.expander("Preview Uploaded Files"):
             for name in filenames[:5]:
                 st.write(f"• {name}")
             if len(filenames) > 5:
                 st.write(f"... and {len(filenames) - 5} more")
     else:
-        st.sidebar.error(f"Directory `{root_directory}` not found.")
+        st.sidebar.info("No PDF files uploaded yet.")
 
-    
     # Chunking Strategy
     st.sidebar.subheader("Chunking Strategy")
     chunking_strategy = st.sidebar.selectbox(
@@ -162,7 +151,6 @@ def render_sidebar():
         'top_k': top_k,
         'alpha': alpha
     }
-
 def process_documents_section(config: Dict[str, Any]):
     """Handle document processing section."""
     st.header("Document Processing")
