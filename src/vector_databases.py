@@ -7,8 +7,6 @@ import numpy as np
 import json
 import os
 
-
-# Import specific database clients
 try:
     import chromadb
     from chromadb.config import Settings

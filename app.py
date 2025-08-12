@@ -5,25 +5,21 @@ import sys
 import os
 from typing import Dict, Any, List
 import io
-# Add src directory to path
 sys.path.append(os.path.join(os.path.dirname(__file__), 'src'))
 
 from src.rag_pipeline import RAGPipeline
 from src.comparison_table import ComparisonAnalyzer
 from src.config import VECTOR_DB_CONFIGS, CHUNKING_STRATEGIES, SEARCH_STRATEGIES
 
-# Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Page configuration
 st.set_page_config(
     page_title="RAG Pipeline",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# Custom CSS
 st.markdown("""
 <style>
     .main-header {
@@ -57,7 +53,6 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 def initialize_session_state():
-    """Initialize session state variables."""
     if 'rag_pipeline' not in st.session_state:
         st.session_state.rag_pipeline = RAGPipeline()
     
@@ -77,7 +72,6 @@ def render_sidebar():
     st.sidebar.header("Configuration")
 
     st.sidebar.subheader("Document Source")
-    # --- Changed: Use Streamlit file uploader instead of fixed root directory ---
     uploaded_files = st.sidebar.file_uploader(
         "Upload PDF files",
         type=["pdf"],
@@ -92,7 +86,6 @@ def render_sidebar():
             filenames.append(f.name)
             total_size_mb += f.size / (1024 * 1024)
         st.sidebar.success(f"{len(uploaded_files)} PDFs uploaded ({total_size_mb:.2f} MB)")
-        # Collapsible file preview (first 5 only)
         with st.sidebar.expander("Preview Uploaded Files"):
             for name in filenames[:5]:
                 st.write(f"• {name}")
@@ -101,7 +94,6 @@ def render_sidebar():
     else:
         st.sidebar.info("No PDF files uploaded yet.")
 
-    # Chunking Strategy
     st.sidebar.subheader("Chunking Strategy")
     chunking_strategy = st.sidebar.selectbox(
         "Select chunking strategy",
@@ -110,12 +102,10 @@ def render_sidebar():
         help="Choose how to split documents into chunks"
     )
     
-    # Chunking Parameters
     with st.sidebar.expander("Chunking Parameters"):
         chunk_size = st.slider("Chunk Size", 500, 2000, 1000)
         chunk_overlap = st.slider("Chunk Overlap", 0, 500, 200)
     
-    # Vector Database
     st.sidebar.subheader("Vector Database")
     vector_db = st.sidebar.selectbox(
         "Select vector database",
@@ -124,7 +114,6 @@ def render_sidebar():
         help="Choose the vector database for storing embeddings"
     )
     
-    # Search Strategy
     st.sidebar.subheader("Search Strategy")
     search_strategy = st.sidebar.selectbox(
         "Select search strategy",
@@ -133,7 +122,6 @@ def render_sidebar():
         help="Choose the search method for retrieval"
     )
     
-    # Search Parameters
     with st.sidebar.expander("Search Parameters"):
         top_k = st.slider("Number of Results", 1, 20, 5)
         if search_strategy == "hybrid":
