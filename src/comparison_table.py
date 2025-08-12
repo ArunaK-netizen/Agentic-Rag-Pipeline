@@ -86,16 +86,6 @@ class ComparisonAnalyzer:
                 "Vector Similarity": "Cosine, Euclidean, Dot",
                 "Filtering": "Metadata",
                 "Updates": "Yes"
-            },
-            "Azure AI Search": {
-                "Type": "Cloud",
-                "Persistence": "Yes",
-                "Scalability": "Very High",
-                "Ease of Setup": "Medium",
-                "Cost": "Paid",
-                "Vector Similarity": "Cosine, Euclidean, Dot",
-                "Filtering": "Advanced",
-                "Updates": "Yes"
             }
         }
         

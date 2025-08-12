@@ -26,12 +26,6 @@ VECTOR_DB_CONFIGS = {
         "description": "Managed vector database",
         "api_key": os.getenv("PINECONE_API_KEY"),
         "environment": os.getenv("PINECONE_ENV", "us-west1-gcp")
-    },
-    "azure": {
-        "name": "Azure AI Search",
-        "description": "Microsoft Azure cognitive search",
-        "endpoint": os.getenv("AZURE_SEARCH_ENDPOINT"),
-        "api_key": os.getenv("AZURE_SEARCH_API_KEY")
     }
 }
 
