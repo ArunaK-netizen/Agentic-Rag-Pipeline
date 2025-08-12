@@ -1,248 +1,29 @@
-"""Vector database implementations for different providers."""
-
 from typing import List, Dict, Any, Optional
 from abc import ABC, abstractmethod
 import logging
 import numpy as np
 import json
 import os
+import uuid
 
-try:
-    import chromadb
-    from chromadb.config import Settings
-except ImportError:
-    chromadb = None
+import re
 
-try:
-    import faiss
-except ImportError:
-    faiss = None
+def _normalize_pinecone_name(name: str, fallback: str = "default") -> str:
+    if not name or not isinstance(name, str):
+        name = fallback
+    name = name.lower()
+    name = re.sub(r"[^a-z0-9-]+", "-", name)   # only a-z, 0-9, and '-'
+    name = re.sub(r"-{2,}", "-", name)         # collapse multiple '-'
+    name = name.strip("-") or fallback
+    # enforce a reasonable max length (Pinecone currently allows up to 45-48 safely)
+    return name[:48]
 
-try:
-    from qdrant_client import QdrantClient
-    from qdrant_client.models import Distance, VectorParams, PointStruct
-except ImportError:
-    QdrantClient = None
 
-try:
-    import pinecone
-except ImportError:
-    pinecone = None
-
-try:
-    from azure.search.documents import SearchClient
-    from azure.search.documents.indexes import SearchIndexClient
-    from azure.core.credentials import AzureKeyCredential
-except ImportError:
-    SearchClient = None
 
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
 
-class VectorDatabaseInterface(ABC):
-    """Abstract interface for vector databases."""
-    
-    @abstractmethod
-    def create_index(self, dimension: int, index_name: str = "default"):
-        pass
-    
-    @abstractmethod
-    def add_documents(self, documents: List[Dict[str, Any]], embeddings: np.ndarray):
-        pass
-    
-    @abstractmethod
-    def search(self, query_embedding: np.ndarray, top_k: int = 5) -> List[Dict[str, Any]]:
-        pass
-    
-    @abstractmethod
-    def delete_index(self):
-        pass
-
-class ChromaDBManager(VectorDatabaseInterface):
-    """ChromaDB vector database implementation."""
-    
-    def __init__(self, persist_directory: str = "./chroma_db"):
-        if chromadb is None:
-            raise ImportError("ChromaDB not installed")
-        
-        self.persist_directory = persist_directory
-        self.client = chromadb.PersistentClient(path=persist_directory)
-        self.collection = None
-    
-    def create_index(self, dimension: int, index_name: str = "default"):
-        try:
-            self.collection = self.client.get_or_create_collection(
-                name=index_name,
-                metadata={"hnsw:space": "cosine"}
-            )
-        except Exception as e:
-            logger.error(f"Error creating ChromaDB index: {e}")
-            raise
-    
-    def add_documents(self, documents: List[Dict[str, Any]], embeddings: np.ndarray):
-        if self.collection is None:
-            raise ValueError("Index not created")
-        
-        ids = [doc["metadata"]["chunk_id"] for doc in documents]
-        texts = [doc["text"] for doc in documents]
-        metadatas = [doc["metadata"] for doc in documents]
-        
-        self.collection.add(
-            embeddings=embeddings.tolist(),
-            documents=texts,
-            metadatas=metadatas,
-            ids=ids
-        )
-    
-    def search(self, query_embedding: np.ndarray, top_k: int = 5) -> List[Dict[str, Any]]:
-        if self.collection is None:
-            raise ValueError("Index not created")
-        
-        results = self.collection.query(
-            query_embeddings=[query_embedding.tolist()],
-            n_results=top_k
-        )
-        
-        search_results = []
-        for i in range(len(results["documents"][0])):
-            search_results.append({
-                "text": results["documents"][0][i],
-                "metadata": results["metadatas"][0][i],
-                "score": 1 - results["distances"][0][i]  # Convert distance to similarity
-            })
-        
-        return search_results
-    
-    def delete_index(self):
-        if self.collection:
-            self.client.delete_collection(self.collection.name)
-
-class FAISSManager(VectorDatabaseInterface):
-    """FAISS vector database implementation."""
-    
-    def __init__(self, index_file: str = "./faiss_index"):
-        if faiss is None:
-            raise ImportError("FAISS not installed")
-        
-        self.index_file = index_file
-        self.index = None
-        self.documents = []
-        self.dimension = None
-    
-    def create_index(self, dimension: int, index_name: str = "default"):
-        self.dimension = dimension
-        self.index = faiss.IndexFlatIP(dimension)  # Inner Product similarity
-    
-    def add_documents(self, documents: List[Dict[str, Any]], embeddings: np.ndarray):
-        if self.index is None:
-            raise ValueError("Index not created")
-        
-        # Normalize embeddings for cosine similarity
-        faiss.normalize_L2(embeddings)
-        self.index.add(embeddings.astype('float32'))
-        self.documents.extend(documents)
-        
-        # Save index and documents
-        faiss.write_index(self.index, f"{self.index_file}.index")
-        with open(f"{self.index_file}.docs", 'w') as f:
-            json.dump(self.documents, f)
-    
-    def search(self, query_embedding: np.ndarray, top_k: int = 5) -> List[Dict[str, Any]]:
-        if self.index is None:
-            raise ValueError("Index not created")
-        
-        # Normalize query
-        query_embedding = query_embedding.reshape(1, -1).astype('float32')
-        faiss.normalize_L2(query_embedding)
-        
-        distances, indices = self.index.search(query_embedding, top_k)
-        
-        search_results = []
-        for i, idx in enumerate(indices[0]):
-            if idx < len(self.documents):
-                doc = self.documents[idx]
-                search_results.append({
-                    "text": doc["text"],
-                    "metadata": doc["metadata"],
-                    "score": float(distances[0][i])
-                })
-        
-        return search_results
-    
-    def delete_index(self):
-        for ext in ['.index', '.docs']:
-            file_path = f"{self.index_file}{ext}"
-            if os.path.exists(file_path):
-                os.remove(file_path)
-
-class QdrantManager(VectorDatabaseInterface):
-    """Qdrant vector database implementation."""
-    
-    def __init__(self, host: str = "localhost", port: int = 6333):
-        if QdrantClient is None:
-            raise ImportError("Qdrant client not installed")
-        
-        self.client = QdrantClient(host=host, port=port)
-        self.collection_name = None
-    
-    def create_index(self, dimension: int, index_name: str = "default"):
-        self.collection_name = index_name
-        
-        try:
-            self.client.recreate_collection(
-                collection_name=self.collection_name,
-                vectors_config=VectorParams(size=dimension, distance=Distance.COSINE)
-            )
-        except Exception as e:
-            logger.error(f"Error creating Qdrant collection: {e}")
-            raise
-    
-    def add_documents(self, documents: List[Dict[str, Any]], embeddings: np.ndarray):
-        if self.collection_name is None:
-            raise ValueError("Index not created")
-        
-        points = []
-        for i, doc in enumerate(documents):
-            points.append(PointStruct(
-                id=i,
-                vector=embeddings[i].tolist(),
-                payload={
-                    "text": doc["text"],
-                    "metadata": doc["metadata"]
-                }
-            ))
-        
-        self.client.upsert(
-            collection_name=self.collection_name,
-            points=points
-        )
-    
-    def search(self, query_embedding: np.ndarray, top_k: int = 5) -> List[Dict[str, Any]]:
-        if self.collection_name is None:
-            raise ValueError("Index not created")
-        
-        search_result = self.client.search(
-            collection_name=self.collection_name,
-            query_vector=query_embedding.tolist(),
-            limit=top_k
-        )
-        
-        results = []
-        for point in search_result:
-            results.append({
-                "text": point.payload["text"],
-                "metadata": point.payload["metadata"],
-                "score": point.score
-            })
-        
-        return results
-    
-    def delete_index(self):
-        if self.collection_name:
-            self.client.delete_collection(self.collection_name)
-
-# For loading .env file without dotenv dependency
 def load_env_variables():
-    """Load environment variables from .env file manually"""
     env_path = '.env'
     if os.path.exists(env_path):
         with open(env_path, 'r') as f:
@@ -250,11 +31,46 @@ def load_env_variables():
                 line = line.strip()
                 if line and not line.startswith('#') and '=' in line:
                     key, value = line.split('=', 1)
-                    # Remove quotes if present
                     value = value.strip().strip('"').strip("'")
                     os.environ[key.strip()] = value
 
-# Azure AI Search imports (already in your code)
+def json_dumps_safe(obj: Any) -> str:
+    try:
+        return json.dumps(obj, ensure_ascii=False)
+    except Exception:
+        return json.dumps({"raw": str(obj)})
+
+def json_loads_safe(s: str) -> Dict[str, Any]:
+    try:
+        return json.loads(s)
+    except Exception:
+        return {"raw": s}
+
+# Optional imports guarded
+try:
+    import chromadb
+except Exception:
+    chromadb = None
+
+try:
+    import faiss
+except Exception:
+    faiss = None
+
+try:
+    from qdrant_client import QdrantClient
+    from qdrant_client.models import Distance, VectorParams, PointStruct
+except Exception:
+    QdrantClient = None
+
+try:
+    from pinecone import Pinecone, ServerlessSpec, PodSpec
+except Exception:
+    Pinecone = None
+    ServerlessSpec = None
+    PodSpec = None
+
+
 try:
     from azure.search.documents import SearchClient
     from azure.search.documents.indexes import SearchIndexClient
@@ -265,239 +81,533 @@ try:
     )
     from azure.search.documents.models import VectorizedQuery
     from azure.core.credentials import AzureKeyCredential
-except ImportError:
+except Exception:
     SearchClient = None
 
-logger = logging.getLogger(__name__)
+
+class VectorDatabaseInterface(ABC):
+    @abstractmethod
+    def create_index(self, dimension: int, index_name: str = "default"):
+        ...
+
+    @abstractmethod
+    def add_documents(self, documents: List[Dict[str, Any]], embeddings: np.ndarray):
+        ...
+
+    @abstractmethod
+    def search(self, query_embedding: np.ndarray, top_k: int = 5) -> List[Dict[str, Any]]:
+        ...
+
+    @abstractmethod
+    def delete_index(self):
+        ...
+
+    def healthcheck(self) -> bool:
+        return True
+
+
+class ChromaDBManager(VectorDatabaseInterface):
+    def __init__(self, persist_directory: Optional[str] = None, index_name_default: str = "default"):
+        if chromadb is None:
+            raise ImportError("ChromaDB not installed")
+        load_env_variables()
+        self.persist_directory = persist_directory or os.getenv("CHROMA_PERSIST_DIR", "./chroma_data")
+        os.makedirs(self.persist_directory, exist_ok=True)
+        self.client = chromadb.PersistentClient(path=self.persist_directory)
+        self.collection = None
+        self.index_name_default = index_name_default
+
+    def create_index(self, dimension: int, index_name: str = None):
+        idx = index_name or self.index_name_default
+        try:
+            self.collection = self.client.get_or_create_collection(
+                name=idx,
+                metadata={"hnsw:space": "cosine"}
+            )
+        except Exception as e:
+            logger.exception("Error creating ChromaDB index")
+            raise
+
+    def add_documents(self, documents: List[Dict[str, Any]], embeddings: np.ndarray):
+        if self.collection is None:
+            raise ValueError("Index not created")
+        ids = [str(doc.get("metadata", {}).get("chunk_id", f"id_{i}")) for i, doc in enumerate(documents)]
+        texts = [doc.get("text", "") for doc in documents]
+        metadatas = [doc.get("metadata", {}) for doc in documents]
+        self.collection.add(
+            embeddings=embeddings.astype(float).tolist(),
+            documents=texts,
+            metadatas=metadatas,
+            ids=ids
+        )
+
+    def search(self, query_embedding: np.ndarray, top_k: int = 5) -> List[Dict[str, Any]]:
+        if self.collection is None:
+            raise ValueError("Index not created")
+        res = self.collection.query(query_embeddings=[query_embedding.astype(float).tolist()], n_results=top_k)
+        out = []
+        for i in range(len(res.get("documents", [[]])[0])):
+            dist = res["distances"][i]
+            out.append({
+                "text": res["documents"][i],
+                "metadata": res["metadatas"][i],
+                "score": 1 - float(dist)
+            })
+        return out
+
+    def delete_index(self):
+        if self.collection:
+            name = self.collection.name
+            self.client.delete_collection(name)
+            self.collection = None
+
+    def healthcheck(self) -> bool:
+        try:
+            self.client.heartbeat()
+            return True
+        except Exception:
+            return False
+
+
+class FAISSManager(VectorDatabaseInterface):
+    def __init__(self, index_file: str = "./faiss_index"):
+        if faiss is None:
+            raise ImportError("FAISS not installed")
+        self.index_file = index_file
+        self.index = None
+        self.documents: List[Dict[str, Any]] = []
+        self.dimension = None
+        self._load_if_exists()
+
+    def _load_if_exists(self):
+        idx_path = f"{self.index_file}.index"
+        docs_path = f"{self.index_file}.docs"
+        if os.path.exists(idx_path):
+            try:
+                self.index = faiss.read_index(idx_path)
+                self.dimension = self.index.d
+            except Exception:
+                self.index = None
+        if os.path.exists(docs_path):
+            try:
+                with open(docs_path, "r") as f:
+                    self.documents = json.load(f)
+            except Exception:
+                self.documents = []
+
+    def create_index(self, dimension: int, index_name: str = "default"):
+        self.dimension = dimension
+        self.index = faiss.IndexFlatIP(dimension)
+
+    def add_documents(self, documents: List[Dict[str, Any]], embeddings: np.ndarray):
+        if self.index is None:
+            raise ValueError("Index not created")
+        emb = embeddings.astype("float32")
+        faiss.normalize_L2(emb)
+        self.index.add(emb)
+        self.documents.extend(documents)
+        faiss.write_index(self.index, f"{self.index_file}.index")
+        with open(f"{self.index_file}.docs", "w") as f:
+            json.dump(self.documents, f, ensure_ascii=False)
+
+    def search(self, query_embedding: np.ndarray, top_k: int = 5) -> List[Dict[str, Any]]:
+        if self.index is None:
+            raise ValueError("Index not created")
+        q = query_embedding.reshape(1, -1).astype("float32")
+        faiss.normalize_L2(q)
+        distances, indices = self.index.search(q, top_k)
+        results = []
+        for i, idx in enumerate(indices[0]):
+            if idx >= 0 and idx < len(self.documents):
+                doc = self.documents[idx]
+                results.append({
+                    "text": doc.get("text", ""),
+                    "metadata": doc.get("metadata", {}),
+                    "score": float(distances[i])
+                })
+        return results
+
+    def delete_index(self):
+        for ext in [".index", ".docs"]:
+            p = f"{self.index_file}{ext}"
+            try:
+                if os.path.exists(p):
+                    os.remove(p)
+            except Exception:
+                pass
+        self.index = None
+        self.documents = []
+        self.dimension = None
+
+    def healthcheck(self) -> bool:
+        return self.index is not None or (os.path.exists(f"{self.index_file}.index") and os.path.exists(f"{self.index_file}.docs"))
+
+
+class QdrantManager(VectorDatabaseInterface):
+    """Qdrant vector database implementation with env-based config."""
+
+    def __init__(
+        self,
+        host: Optional[str] = None,
+        port: Optional[int] = None,
+        api_key: Optional[str] = None,
+        url: Optional[str] = None,
+        prefer_grpc: Optional[bool] = None,
+        grpc_port: Optional[int] = None,
+        timeout: int = 30,
+    ):
+        if QdrantClient is None:
+            raise ImportError("Qdrant client not installed")
+
+        # Load .env so QDRANT_URL and QDRANT_API_KEY are available in non-local deploys
+        load_env_variables()
+
+        # Resolve configuration from parameters or environment
+        env_url = os.getenv("QDRANT_URL")
+        env_api_key = os.getenv("QDRANT_API_KEY")
+        env_host = os.getenv("QDRANT_HOST", "localhost")
+        env_port = int(os.getenv("QDRANT_PORT", "6333"))
+        env_prefer_grpc = os.getenv("QDRANT_PREFER_GRPC", "").lower()
+        env_grpc_port = int(os.getenv("QDRANT_GRPC_PORT", "6334"))
+
+        resolved_url = url or env_url
+        resolved_api_key = api_key or env_api_key
+        resolved_host = host or env_host
+        resolved_port = int(port or env_port)
+        resolved_prefer_grpc = prefer_grpc if prefer_grpc is not None else (env_prefer_grpc in ("1", "true", "yes"))
+        resolved_grpc_port = int(grpc_port or env_grpc_port)
+
+        # Initialize client:
+        # - If URL is provided, it implies REST endpoint (http://...:6333). prefer_grpc is honored but requires gRPC availability.
+        # - If URL is not provided, use host/port with optional gRPC configuration.
+        if resolved_url:
+            # Example: QDRANT_URL=http://localhost:6333 or https://xxxx.eu-central.aws.cloud.qdrant.io
+            self.client = QdrantClient(
+                url=resolved_url,
+                api_key=resolved_api_key,
+                prefer_grpc=resolved_prefer_grpc,
+                timeout=timeout,
+            )
+        else:
+            # Local/docker: ensure ports are mapped: 6333 for REST, 6334 for gRPC
+            self.client = QdrantClient(
+                host=resolved_host,
+                port=resolved_port,
+                grpc_port=resolved_grpc_port,
+                api_key=resolved_api_key,
+                prefer_grpc=resolved_prefer_grpc,
+                timeout=timeout,
+            )
+
+        self.collection_name = None
+
+    def create_index(self, dimension: int, index_name: str = "default"):
+        self.collection_name = index_name
+        try:
+            self.client.recreate_collection(
+                collection_name=self.collection_name,
+                vectors_config=VectorParams(size=dimension, distance=Distance.COSINE)
+            )
+        except Exception as e:
+            logger.error(f"Error creating Qdrant collection: {e}")
+            raise
+
+    def _make_point_id(self, doc: Dict[str, Any], fallback_int: int):
+        """
+        Qdrant requires point IDs to be uint64 or UUID.
+        Use deterministic UUID v5 if 'chunk_id' exists, else fallback to int.
+        """
+        import uuid
+        meta = doc.get("metadata", {}) or {}
+        chunk_id = meta.get("chunk_id")
+        if chunk_id:
+            # Deterministic UUID from a namespace + chunk_id so upserts overwrite
+            return str(uuid.uuid5(uuid.NAMESPACE_URL, f"qdrant://chunk/{chunk_id}"))
+        # If no chunk_id, use numeric fallback (uint64)
+        return int(fallback_int)
+
+    def add_documents(self, documents: List[Dict[str, Any]], embeddings: np.ndarray):
+        if self.collection_name is None:
+            raise ValueError("Index not created")
+
+        points = []
+        for i, doc in enumerate(documents):
+            point_id = self._make_point_id(doc, i)
+            payload = {
+                "text": doc.get("text", ""),
+                "metadata": doc.get("metadata", {}) or {}
+            }
+            points.append(PointStruct(
+                id=point_id,
+                vector=embeddings[i].astype(float).tolist(),
+                payload=payload
+            ))
+
+        self.client.upsert(collection_name=self.collection_name, points=points, wait=True)
+
+    def search(self, query_embedding: np.ndarray, top_k: int = 5) -> List[Dict[str, Any]]:
+        if self.collection_name is None:
+            raise ValueError("Index not created")
+
+        search_result = self.client.search(
+            collection_name=self.collection_name,
+            query_vector=query_embedding.astype(float).tolist(),
+            limit=top_k
+        )
+
+        results = []
+        for point in search_result:
+            results.append({
+                "text": point.payload.get("text", ""),
+                "metadata": point.payload.get("metadata", {}),
+                "score": float(point.score)
+            })
+
+        return results
+
+    def delete_index(self):
+        if self.collection_name:
+            self.client.delete_collection(self.collection_name)
+            self.collection_name = None
+
+class PineconeManager(VectorDatabaseInterface):
+    def __init__(
+        self,
+        index_name_default: str = "default",
+        dimension_default: Optional[int] = None,
+        metric: str = "cosine",
+        # Serverless config (recommended)
+        cloud: Optional[str] = None,      # e.g., "aws", "gcp", "azure"
+        region: Optional[str] = None,     # e.g., "us-west-2", "us-east-1", "eu-central-1"
+        # Legacy pods (optional)
+        pod_env: Optional[str] = None,    # e.g., "us-west1-gcp"
+        pod_spec_size: str = "p1.x1",     # pod size if using pods
+    ):
+        if Pinecone is None:
+            raise ImportError("Pinecone not installed")
+        load_env_variables()
+        api_key = os.getenv("PINECONE_API_KEY")
+        if not api_key:
+            raise ValueError("PINECONE_API_KEY missing")
+
+        self.pc = Pinecone(api_key=api_key)
+        self.index_name_default = index_name_default
+        self.metric = metric
+        self.dimension_default = dimension_default
+
+        # Prefer serverless; fall back to pod if explicit
+        self.cloud = cloud or os.getenv("PINECONE_CLOUD")          # "aws" | "gcp" | "azure"
+        self.region = region or os.getenv("PINECONE_REGION")       # "us-west-2" etc.
+        self.pod_env = pod_env or os.getenv("PINECONE_ENVIRONMENT")  # legacy pod env
+        self.pod_spec_size = pod_spec_size
+
+        self.index = None
+
+    
+    def _ensure_index(self, idx: str, dimension: int):
+        idx = _normalize_pinecone_name(idx)
+        existing = self.pc.list_indexes()
+        existing_names = [i.name for i in getattr(existing, "indexes", [])] or getattr(existing, "names", lambda: [])()
+        if idx not in existing_names:
+            if self.cloud and self.region:
+                self.pc.create_index(
+                    name=idx,
+                    dimension=dimension,
+                    metric=self.metric,
+                    spec=ServerlessSpec(cloud=self.cloud, region=self.region),
+                )
+            elif self.pod_env:
+                self.pc.create_index(
+                    name=idx,
+                    dimension=dimension,
+                    metric=self.metric,
+                    spec=PodSpec(environment=self.pod_env, pod_type=self.pod_spec_size, pods=1, replicas=1),
+                )
+            else:
+                raise ValueError("Provide serverless (PINECONE_CLOUD + PINECONE_REGION) or pod (PINECONE_ENVIRONMENT) config.")
+        self.index = self.pc.Index(idx)
+
+    def create_index(self, dimension: int, index_name: str = None):
+        idx = _normalize_pinecone_name(index_name or self.index_name_default or "default")
+        if not dimension and not self.dimension_default:
+            raise ValueError("Pinecone requires an embedding dimension")
+        dim = int(dimension or self.dimension_default)
+        self._ensure_index(idx, dim)
+    
+    
+    def add_documents(self, documents: List[Dict[str, Any]], embeddings: np.ndarray):
+        if self.index is None:
+            raise ValueError("Index not created")
+        vectors = []
+        for i, doc in enumerate(documents):
+            vid = str(doc.get("metadata", {}).get("chunk_id", f"id_{i}"))
+            vectors.append({
+                "id": vid,
+                "values": embeddings[i].astype(float).tolist(),
+                "metadata": {"text": doc.get("text", ""), **(doc.get("metadata", {}) or {})}
+            })
+        # upsert in chunks
+        batch = 100
+        for i in range(0, len(vectors), batch):
+            self.index.upsert(vectors=vectors[i:i+batch])
+
+    def search(self, query_embedding: np.ndarray, top_k: int = 5) -> List[Dict[str, Any]]:
+        if self.index is None:
+            raise ValueError("Index not created")
+        res = self.index.query(
+            vector=query_embedding.astype(float).tolist(),
+            top_k=top_k,
+            include_metadata=True
+        )
+        out = []
+        matches = getattr(res, "matches", None) or []
+        for m in matches:
+            md = getattr(m, "metadata", {}) or {}
+            out.append({
+                "text": md.get("text", ""),
+                "metadata": {k: v for k, v in md.items() if k != "text"},
+                "score": float(getattr(m, "score", 0.0) or 0.0)
+            })
+        return out
+
+    def delete_index(self):
+        if self.index:
+            name = self.index.name if hasattr(self.index, "name") else getattr(self.index, "_name", None)
+            self.index = None
+            if name:
+                self.pc.delete_index(name)
+
+    def healthcheck(self) -> bool:
+        try:
+            _ = self.pc.list_indexes()
+            return True
+        except Exception:
+            return False
+
 
 class AzureAISearchManager(VectorDatabaseInterface):
-    """Azure AI Search vector database implementation."""
-    
-    def __init__(self, service_endpoint: str = None, api_key: str = None, 
-                 index_name: str = "default-vector-index"):
+    def __init__(self, service_endpoint: Optional[str] = None, api_key: Optional[str] = None, index_name: str = "default-vector-index"):
         if SearchClient is None:
             raise ImportError("Azure Search Documents not installed. Run: pip install azure-search-documents")
-        
-        # Load environment variables if not provided
-        if not service_endpoint or not api_key:
-            load_env_variables()
-            
+        load_env_variables()
         self.service_endpoint = service_endpoint or os.getenv("AZURE_SEARCH_SERVICE_ENDPOINT")
         self.api_key = api_key or os.getenv("AZURE_SEARCH_API_KEY")
-        self.index_name = index_name
-        
         if not self.service_endpoint or not self.api_key:
-            raise ValueError("Azure Search service endpoint and API key must be provided via parameters or .env file")
-        
+            raise ValueError("Azure Search service endpoint and API key must be provided via params or env")
         self.credential = AzureKeyCredential(self.api_key)
         self.index_client = SearchIndexClient(self.service_endpoint, self.credential)
         self.search_client = None
-        self.dimension = None
-    
-    def create_index(self, dimension: int, index_name: str = "default"):
-        """Create Azure AI Search index with vector field configuration."""
-        self.dimension = dimension
         self.index_name = index_name
-        
-        try:
-            # Define the index schema
-            fields = [
-                SimpleField(name="id", type=SearchFieldDataType.String, key=True),
-                SearchableField(name="content", type=SearchFieldDataType.String),
-                SearchField(
-                    name="content_vector",
-                    type=SearchFieldDataType.Collection(SearchFieldDataType.Single),
-                    searchable=True,
-                    vector_search_dimensions=dimension,
-                    vector_search_profile_name="vector-profile"
-                ),
-                SearchableField(name="metadata", type=SearchFieldDataType.String)
-            ]
-            
-            # Configure vector search
-            vector_search = VectorSearch(
-                profiles=[
-                    VectorSearchProfile(
-                        name="vector-profile",
-                        algorithm_configuration_name="vector-algorithm"
-                    )
-                ],
-                algorithms=[
-                    HnswAlgorithmConfiguration(name="vector-algorithm")
-                ]
-            )
-            
-            # Create the index
-            index = SearchIndex(
-                name=self.index_name,
-                fields=fields,
-                vector_search=vector_search
-            )
-            
-            # Create or update the index
-            self.index_client.create_or_update_index(index)
-            
-            # Initialize search client
-            self.search_client = SearchClient(
-                self.service_endpoint, 
-                self.index_name, 
-                self.credential
-            )
-            
-            logger.info(f"Successfully created Azure AI Search index: {self.index_name}")
-            
-        except Exception as e:
-            logger.error(f"Error creating Azure AI Search index: {e}")
-            raise
-    
+        self.dimension = None
+
+    def create_index(self, dimension: int, index_name: str = None):
+        self.dimension = dimension
+        if index_name:
+            self.index_name = index_name
+
+        fields = [
+            SimpleField(name="id", type=SearchFieldDataType.String, key=True),
+            SearchableField(name="content", type=SearchFieldDataType.String),
+            # Proper vector field: Collection(Single) with dimensions and profile
+            SearchField(
+                name="content_vector",
+                type=SearchFieldDataType.Collection(SearchFieldDataType.Single),
+                searchable=True,
+                vector_search_dimensions=dimension,
+                vector_search_profile_name="vector-profile"
+            ),
+            # Store metadata as JSON string for safety
+            SimpleField(name="metadata_json", type=SearchFieldDataType.String, filterable=False, facetable=False, sortable=False)
+        ]
+
+        vector_search = VectorSearch(
+            profiles=[
+                VectorSearchProfile(
+                    name="vector-profile",
+                    algorithm_configuration_name="vector-algo"
+                )
+            ],
+            algorithms=[HnswAlgorithmConfiguration(name="vector-algo")]
+        )
+
+        index = SearchIndex(name=self.index_name, fields=fields, vector_search=vector_search)
+        self.index_client.create_or_update_index(index)
+
+        self.search_client = SearchClient(self.service_endpoint, self.index_name, self.credential)
+        logger.info(f"Created/updated Azure AI Search index: {self.index_name}")
+
     def add_documents(self, documents: List[Dict[str, Any]], embeddings: np.ndarray):
-        """Add documents with embeddings to the Azure AI Search index."""
         if self.search_client is None:
             raise ValueError("Index not created. Call create_index() first.")
-        
-        try:
-            # Prepare documents for Azure AI Search
-            search_documents = []
-            for i, doc in enumerate(documents):
-                # Create a unique ID if not present
-                doc_id = doc.get("metadata", {}).get("chunk_id", f"doc_{i}")
-                
-                search_doc = {
-                    "id": str(doc_id),
-                    "content": doc.get("text", ""),
-                    "content_vector": embeddings[i].tolist(),
-                    "metadata": str(doc.get("metadata", {}))  # Convert dict to string for storage
-                }
-                search_documents.append(search_doc)
-            
-            # Upload documents in batches
-            batch_size = 100  # Azure AI Search batch limit
-            for i in range(0, len(search_documents), batch_size):
-                batch = search_documents[i:i + batch_size]
-                result = self.search_client.upload_documents(documents=batch)
-                
-                # Check for any failures
-                for doc_result in result:
-                    if not doc_result.succeeded:
-                        logger.warning(f"Failed to index document {doc_result.key}: {doc_result.error_message}")
-            
-            logger.info(f"Successfully added {len(documents)} documents to Azure AI Search index")
-            
-        except Exception as e:
-            logger.error(f"Error adding documents to Azure AI Search: {e}")
-            raise
-    
+        search_documents = []
+        for i, doc in enumerate(documents):
+            doc_id = str(doc.get("metadata", {}).get("chunk_id", f"doc_{i}"))
+            search_documents.append({
+                "id": doc_id,
+                "content": doc.get("text", ""),
+                "content_vector": embeddings[i].astype(float).tolist(),
+                "metadata_json": json_dumps_safe(doc.get("metadata", {}))
+            })
+        batch_size = 1000
+        for i in range(0, len(search_documents), batch_size):
+            result = self.search_client.upload_documents(documents=search_documents[i:i+batch_size])
+            for r in result:
+                if not r.succeeded:
+                    logger.warning(f"Failed to index document {r.key}: {getattr(r, 'error_message', 'unknown')}")
+
     def search(self, query_embedding: np.ndarray, top_k: int = 5) -> List[Dict[str, Any]]:
-        """Perform vector similarity search in Azure AI Search."""
         if self.search_client is None:
             raise ValueError("Index not created. Call create_index() first.")
-        
-        try:
-            # Create vector query
-            vector_query = VectorizedQuery(
-                vector=query_embedding.tolist(),
-                k_nearest_neighbors=top_k,
-                fields="content_vector"
-            )
-            
-            # Execute the search
-            results = self.search_client.search(
-                search_text=None,  # Pure vector search
-                vector_queries=[vector_query],
-                select=["id", "content", "metadata"],
-                top=top_k
-            )
-            
-            # Format results
-            search_results = []
-            for result in results:
-                try:
-                    # Parse metadata back from string
-                    metadata = eval(result.get("metadata", "{}")) if result.get("metadata") else {}
-                except:
-                    metadata = {"raw_metadata": result.get("metadata", "")}
-                
-                search_results.append({
-                    "text": result.get("content", ""),
-                    "metadata": metadata,
-                    "score": result.get("@search.score", 0.0)
-                })
-            
-            return search_results
-            
-        except Exception as e:
-            logger.error(f"Error performing vector search in Azure AI Search: {e}")
-            raise
-    
+        vq = VectorizedQuery(vector=query_embedding.astype(float).tolist(), k_nearest_neighbors=top_k, fields="content_vector")
+        results = self.search_client.search(search_text=None, vector_queries=[vq], select=["id", "content", "metadata_json"], top=top_k)
+        out = []
+        for r in results:
+            out.append({
+                "text": r.get("content", ""),
+                "metadata": json_loads_safe(r.get("metadata_json", "{}")),
+                "score": float(r.get("@search.score", 0.0))
+            })
+        return out
+
     def hybrid_search(self, query_text: str, query_embedding: np.ndarray, top_k: int = 5) -> List[Dict[str, Any]]:
-        """Perform hybrid search combining text and vector search."""
         if self.search_client is None:
             raise ValueError("Index not created. Call create_index() first.")
-        
-        try:
-            # Create vector query
-            vector_query = VectorizedQuery(
-                vector=query_embedding.tolist(),
-                k_nearest_neighbors=top_k,
-                fields="content_vector"
-            )
-            
-            # Execute hybrid search
-            results = self.search_client.search(
-                search_text=query_text,  # Text search component
-                vector_queries=[vector_query],  # Vector search component
-                select=["id", "content", "metadata"],
-                top=top_k
-            )
-            
-            # Format results
-            search_results = []
-            for result in results:
-                try:
-                    metadata = eval(result.get("metadata", "{}")) if result.get("metadata") else {}
-                except:
-                    metadata = {"raw_metadata": result.get("metadata", "")}
-                
-                search_results.append({
-                    "text": result.get("content", ""),
-                    "metadata": metadata,
-                    "score": result.get("@search.score", 0.0)
-                })
-            
-            return search_results
-            
-        except Exception as e:
-            logger.error(f"Error performing hybrid search in Azure AI Search: {e}")
-            raise
-    
+        vq = VectorizedQuery(vector=query_embedding.astype(float).tolist(), k_nearest_neighbors=top_k, fields="content_vector")
+        results = self.search_client.search(search_text=query_text, vector_queries=[vq], select=["id", "content", "metadata_json"], top=top_k)
+        out = []
+        for r in results:
+            out.append({
+                "text": r.get("content", ""),
+                "metadata": json_loads_safe(r.get("metadata_json", "{}")),
+                "score": float(r.get("@search.score", 0.0))
+            })
+        return out
+
     def delete_index(self):
-        """Delete the Azure AI Search index."""
+        if self.index_name:
+            self.index_client.delete_index(self.index_name)
+            self.search_client = None
+
+    def healthcheck(self) -> bool:
         try:
-            if self.index_name:
-                self.index_client.delete_index(self.index_name)
-                self.search_client = None
-                logger.info(f"Successfully deleted Azure AI Search index: {self.index_name}")
-        except Exception as e:
-            logger.error(f"Error deleting Azure AI Search index: {e}")
-            raise
+            _ = self.index_client.get_index(self.index_name)
+            return True
+        except Exception:
+            return False
 
 
 class VectorDatabaseFactory:
-    """Factory for creating vector database instances."""
-    
     @staticmethod
     def create_database(db_type: str, **kwargs) -> VectorDatabaseInterface:
+        db_type = (db_type or "").lower()
         if db_type == "chroma":
             return ChromaDBManager(**kwargs)
-        elif db_type == "faiss":
+        if db_type == "faiss":
             return FAISSManager(**kwargs)
-        elif db_type == "qdrant":
+        if db_type == "qdrant":
             return QdrantManager(**kwargs)
-        elif db_type == "pinecone":
-            # Placeholder for Pinecone implementation
-            raise NotImplementedError("Pinecone implementation pending")
-        elif db_type == "azure":
-            # Placeholder for Azure AI Search implementation
+        if db_type == "pinecone":
+            return PineconeManager(**kwargs)
+        if db_type == "azure":
             return AzureAISearchManager(**kwargs)
-        else:
-            raise ValueError(f"Unsupported database type: {db_type}")
+        raise ValueError(f"Unsupported database type: {db_type}")
