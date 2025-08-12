@@ -5,8 +5,6 @@ import sys
 import os
 from typing import Dict, Any, List
 import io
-sys.path.append(os.path.join(os.path.dirname(__file__), 'src'))
-
 from src.rag_pipeline import RAGPipeline
 from src.comparison_table import ComparisonAnalyzer
 from src.config import VECTOR_DB_CONFIGS, CHUNKING_STRATEGIES, SEARCH_STRATEGIES
