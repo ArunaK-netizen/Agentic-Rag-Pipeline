@@ -5,7 +5,7 @@ import numpy as np
 import json
 import os
 import uuid
-
+import streamlit as st
 import re
 
 def _normalize_pinecone_name(name: str, fallback: str = "default") -> str:
@@ -23,16 +23,25 @@ def _normalize_pinecone_name(name: str, fallback: str = "default") -> str:
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
+import streamlit as st
+
 def load_env_variables():
-    env_path = '.env'
-    if os.path.exists(env_path):
-        with open(env_path, 'r') as f:
-            for line in f:
-                line = line.strip()
-                if line and not line.startswith('#') and '=' in line:
-                    key, value = line.split('=', 1)
-                    value = value.strip().strip('"').strip("'")
-                    os.environ[key.strip()] = value
+    env_vars = {
+        "PINECONE_API_KEY": st.secrets["PINECONE_API_KEY"],
+        "PINECONE_REGION": st.secrets["PINECONE_REGION"],
+        "PINECONE_CLOUD": st.secrets["PINECONE_CLOUD"],
+        "AZURE_SEARCH_ENDPOINT": st.secrets["AZURE_SEARCH_ENDPOINT"],
+        "AZURE_SEARCH_API_KEY": st.secrets["AZURE_SEARCH_API_KEY"],
+        "GEMINI_API_KEY": st.secrets["GEMINI_API_KEY"],
+        "QDRANT_URL": st.secrets["QDRANT_URL"],
+        "QDRANT_API_KEY": st.secrets["QDRANT_API_KEY"]
+    }
+
+    for key, value in env_vars.items():
+        os.environ[key] = value
+
+    return env_vars
+
 
 def json_dumps_safe(obj: Any) -> str:
     try:
@@ -97,7 +106,7 @@ class ChromaDBManager(VectorDatabaseInterface):
         if chromadb is None:
             raise ImportError("ChromaDB not installed")
         load_env_variables()
-        self.persist_directory = persist_directory or os.getenv("CHROMA_PERSIST_DIR", "./chroma_data")
+        self.persist_directory = persist_directory or st.secrets("CHROMA_PERSIST_DIR", "./chroma_data")
         os.makedirs(self.persist_directory, exist_ok=True)
         self.client = chromadb.PersistentClient(path=self.persist_directory)
         self.collection = None
@@ -249,12 +258,12 @@ class QdrantManager(VectorDatabaseInterface):
         load_env_variables()
 
         # Resolve configuration from parameters or environment
-        env_url = os.getenv("QDRANT_URL")
-        env_api_key = os.getenv("QDRANT_API_KEY")
-        env_host = os.getenv("QDRANT_HOST", "localhost")
-        env_port = int(os.getenv("QDRANT_PORT", "6333"))
-        env_prefer_grpc = os.getenv("QDRANT_PREFER_GRPC", "").lower()
-        env_grpc_port = int(os.getenv("QDRANT_GRPC_PORT", "6334"))
+        env_url = st.secrets("QDRANT_URL")
+        env_api_key = st.secrets("QDRANT_API_KEY")
+        env_host = st.secrets("QDRANT_HOST", "localhost")
+        env_port = int(st.secrets("QDRANT_PORT", "6333"))
+        env_prefer_grpc = st.secrets("QDRANT_PREFER_GRPC", "").lower()
+        env_grpc_port = int(st.secrets("QDRANT_GRPC_PORT", "6334"))
 
         resolved_url = url or env_url
         resolved_api_key = api_key or env_api_key
@@ -371,7 +380,7 @@ class PineconeManager(VectorDatabaseInterface):
         if Pinecone is None:
             raise ImportError("Pinecone not installed")
         load_env_variables()
-        api_key = os.getenv("PINECONE_API_KEY")
+        api_key = st.secrets("PINECONE_API_KEY")
         if not api_key:
             raise ValueError("PINECONE_API_KEY missing")
 
@@ -381,9 +390,9 @@ class PineconeManager(VectorDatabaseInterface):
         self.dimension_default = dimension_default
 
         # Prefer serverless; fall back to pod if explicit
-        self.cloud = cloud or os.getenv("PINECONE_CLOUD")          # "aws" | "gcp" | "azure"
-        self.region = region or os.getenv("PINECONE_REGION")       # "us-west-2" etc.
-        self.pod_env = pod_env or os.getenv("PINECONE_ENVIRONMENT")  # legacy pod env
+        self.cloud = cloud or st.secrets("PINECONE_CLOUD")          # "aws" | "gcp" | "azure"
+        self.region = region or st.secrets("PINECONE_REGION")       # "us-west-2" etc.
+        self.pod_env = pod_env or st.secrets("PINECONE_ENVIRONMENT")  # legacy pod env
         self.pod_spec_size = pod_spec_size
 
         self.index = None

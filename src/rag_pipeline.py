@@ -8,11 +8,11 @@ from .chunking_strategies import ChunkingManager
 from .vector_databases import VectorDatabaseFactory
 from .search_strategies import SearchManager
 from .config import VECTOR_DB_CONFIGS, CHUNKING_STRATEGIES, SEARCH_STRATEGIES
-from dotenv import load_dotenv
 import os
 import tempfile
 import fitz  
 import google.generativeai
+import streamlit as st
 
 logger = logging.getLogger(__name__)
 
@@ -225,12 +225,10 @@ class RAGPipeline:
             Dict[str, Any]: {"success": True, "answer": ...} or {"error": ...}
         """
         try:
-            # Load Gemini API key from .env
-            load_dotenv()
-            api_key = os.getenv("GEMINI_API_KEY")
+            api_key = st.secrets["GEMINI_API_KEY"]
             if not api_key:
-                logger.error("GEMINI_API_KEY not found in environment.")
-                return {"error": "GEMINI_API_KEY not set in .env file."}
+                logger.error("GEMINI_API_KEY not found in secrets.")
+                return {"error": "GEMINI_API_KEY not set in secrets."}
             google.generativeai.configure(api_key=api_key)
 
             # Concatenate retrieved document texts

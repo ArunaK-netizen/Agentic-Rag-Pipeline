@@ -2,14 +2,15 @@ from typing import List, Dict, Any
 import logging
 import re
 import numpy as np
-import google.generativeai as genai
+import google.generativeai as 
+import streamlit as st
 import os
 logger = logging.getLogger(__name__)
 
 class ChunkingManager:
 
     def __init__(self):
-        genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+        genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
         self.model = genai.embed_content  # Uses Gemini's embedding endpoint
 
     def fixed_size_chunking(self, text: str, chunk_size: int = 1000, chunk_overlap: int = 200) -> List[Dict[str, Any]]:
