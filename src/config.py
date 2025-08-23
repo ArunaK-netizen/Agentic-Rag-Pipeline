@@ -5,16 +5,6 @@ from typing import Dict, Any
 
 # Vector Database Configurations
 VECTOR_DB_CONFIGS = {
-    "chroma": {
-        "name": "ChromaDB",
-        "description": "Open-source embedding database",
-        "persist_directory": "./chroma_db"
-    },
-    "faiss": {
-        "name": "FAISS",
-        "description": "Facebook AI Similarity Search",
-        "index_file": "./faiss_index"
-    },
     "qdrant": {
         "name": "Qdrant",
         "description": "Vector similarity search engine",

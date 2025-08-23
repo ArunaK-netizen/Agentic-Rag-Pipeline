@@ -112,6 +112,7 @@ class SearchManager:
     def search_with_strategy(self, vector_db, query: str, strategy: str, 
                            top_k: int = 5, **kwargs) -> List[Dict[str, Any]]:
         """Search using the specified strategy."""
+    
         if strategy == "vector":
             return self.vector_search(vector_db, query, top_k)
         elif strategy == "semantic":

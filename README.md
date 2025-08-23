@@ -16,8 +16,6 @@ A comprehensive Retrieval-Augmented Generation (RAG) pipeline with multiple chun
 - **Sentence-based**: Split by sentences with size constraints
 
 ### 🗄️ Vector Databases
-- **ChromaDB**: Open-source embedded vector database
-- **FAISS**: Facebook AI Similarity Search library
 - **Qdrant**: Vector similarity search engine
 - **Pinecone**: Managed cloud vector database (planned)
 - **Azure AI Search**: Microsoft's cognitive search service (planned)
@@ -106,11 +104,8 @@ streamlit run app.py
 #### Vector Databases
 | Database | Type | Persistence | Scalability | Cost |
 |----------|------|-------------|-------------|------|
-| ChromaDB | Embedded | Yes | Medium | Free |
-| FAISS | Library | Manual | High | Free |
 | Qdrant | Server | Yes | High | Free/Paid |
 | Pinecone | Cloud | Yes | Very High | Paid |
-| Azure AI Search | Cloud | Yes | Very High | Paid |
 
 #### Search Strategies
 | Strategy | Description | Latency | Best For |
@@ -133,8 +128,6 @@ streamlit run app.py
 
 ## Performance Considerations
 
-- **ChromaDB**: Best for development and small-scale deployments
-- **FAISS**: Optimal for CPU-intensive, high-performance scenarios
 - **Qdrant**: Excellent for production with advanced filtering needs
 - **Semantic Chunking**: Higher quality but computationally expensive
 - **Hybrid Search**: Most flexible but slower than pure vector search

@@ -47,26 +47,6 @@ class ComparisonAnalyzer:
         db_comparisons = []
         
         db_features = {
-            "ChromaDB": {
-                "Type": "Embedded",
-                "Persistence": "Yes",
-                "Scalability": "Medium",
-                "Ease of Setup": "High",
-                "Cost": "Free",
-                "Vector Similarity": "Cosine, L2, IP",
-                "Filtering": "Metadata",
-                "Updates": "Yes"
-            },
-            "FAISS": {
-                "Type": "Library",
-                "Persistence": "Manual",
-                "Scalability": "High",
-                "Ease of Setup": "Medium",
-                "Cost": "Free",
-                "Vector Similarity": "L2, IP, Cosine",
-                "Filtering": "Limited",
-                "Updates": "Rebuild Required"
-            },
             "Qdrant": {
                 "Type": "Server",
                 "Persistence": "Yes",

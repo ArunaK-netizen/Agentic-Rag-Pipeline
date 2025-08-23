@@ -55,16 +55,6 @@ def json_loads_safe(s: str) -> Dict[str, Any]:
     except Exception:
         return {"raw": s}
 
-# Optional imports guarded
-try:
-    import chromadb
-except Exception:
-    chromadb = None
-
-try:
-    import faiss
-except Exception:
-    faiss = None
 
 try:
     from qdrant_client import QdrantClient
@@ -99,143 +89,6 @@ class VectorDatabaseInterface(ABC):
 
     def healthcheck(self) -> bool:
         return True
-
-
-class ChromaDBManager(VectorDatabaseInterface):
-    def __init__(self, persist_directory: Optional[str] = None, index_name_default: str = "default"):
-        if chromadb is None:
-            raise ImportError("ChromaDB not installed")
-        load_env_variables()
-        self.persist_directory = persist_directory or st.secrets.get("CHROMA_PERSIST_DIR", "./chroma_data")
-        os.makedirs(self.persist_directory, exist_ok=True)
-        self.client = chromadb.PersistentClient(path=self.persist_directory)
-        self.collection = None
-        self.index_name_default = index_name_default
-
-    def create_index(self, dimension: int, index_name: str = None):
-        idx = index_name or self.index_name_default
-        try:
-            self.collection = self.client.get_or_create_collection(
-                name=idx,
-                metadata={"hnsw:space": "cosine"}
-            )
-        except Exception as e:
-            logger.exception("Error creating ChromaDB index")
-            raise
-
-    def add_documents(self, documents: List[Dict[str, Any]], embeddings: np.ndarray):
-        if self.collection is None:
-            raise ValueError("Index not created")
-        ids = [str(doc.get("metadata", {}).get("chunk_id", f"id_{i}")) for i, doc in enumerate(documents)]
-        texts = [doc.get("text", "") for doc in documents]
-        metadatas = [doc.get("metadata", {}) for doc in documents]
-        self.collection.add(
-            embeddings=embeddings.astype(float).tolist(),
-            documents=texts,
-            metadatas=metadatas,
-            ids=ids
-        )
-
-    def search(self, query_embedding: np.ndarray, top_k: int = 5) -> List[Dict[str, Any]]:
-        if self.collection is None:
-            raise ValueError("Index not created")
-        res = self.collection.query(query_embeddings=[query_embedding.astype(float).tolist()], n_results=top_k)
-        out = []
-        for i in range(len(res.get("documents", [[]])[0])):
-            dist = res["distances"][i]
-            out.append({
-                "text": res["documents"][i],
-                "metadata": res["metadatas"][i],
-                "score": 1 - float(dist)
-            })
-        return out
-
-    def delete_index(self):
-        if self.collection:
-            name = self.collection.name
-            self.client.delete_collection(name)
-            self.collection = None
-
-    def healthcheck(self) -> bool:
-        try:
-            self.client.heartbeat()
-            return True
-        except Exception:
-            return False
-
-
-class FAISSManager(VectorDatabaseInterface):
-    def __init__(self, index_file: str = "./faiss_index"):
-        if faiss is None:
-            raise ImportError("FAISS not installed")
-        self.index_file = index_file
-        self.index = None
-        self.documents: List[Dict[str, Any]] = []
-        self.dimension = None
-        self._load_if_exists()
-
-    def _load_if_exists(self):
-        idx_path = f"{self.index_file}.index"
-        docs_path = f"{self.index_file}.docs"
-        if os.path.exists(idx_path):
-            try:
-                self.index = faiss.read_index(idx_path)
-                self.dimension = self.index.d
-            except Exception:
-                self.index = None
-        if os.path.exists(docs_path):
-            try:
-                with open(docs_path, "r") as f:
-                    self.documents = json.load(f)
-            except Exception:
-                self.documents = []
-
-    def create_index(self, dimension: int, index_name: str = "default"):
-        self.dimension = dimension
-        self.index = faiss.IndexFlatIP(dimension)
-
-    def add_documents(self, documents: List[Dict[str, Any]], embeddings: np.ndarray):
-        if self.index is None:
-            raise ValueError("Index not created")
-        emb = embeddings.astype("float32")
-        faiss.normalize_L2(emb)
-        self.index.add(emb)
-        self.documents.extend(documents)
-        faiss.write_index(self.index, f"{self.index_file}.index")
-        with open(f"{self.index_file}.docs", "w") as f:
-            json.dump(self.documents, f, ensure_ascii=False)
-
-    def search(self, query_embedding: np.ndarray, top_k: int = 5) -> List[Dict[str, Any]]:
-        if self.index is None:
-            raise ValueError("Index not created")
-        q = query_embedding.reshape(1, -1).astype("float32")
-        faiss.normalize_L2(q)
-        distances, indices = self.index.search(q, top_k)
-        results = []
-        for i, idx in enumerate(indices[0]):
-            if idx >= 0 and idx < len(self.documents):
-                doc = self.documents[idx]
-                results.append({
-                    "text": doc.get("text", ""),
-                    "metadata": doc.get("metadata", {}),
-                    "score": float(distances[i])
-                })
-        return results
-
-    def delete_index(self):
-        for ext in [".index", ".docs"]:
-            p = f"{self.index_file}{ext}"
-            try:
-                if os.path.exists(p):
-                    os.remove(p)
-            except Exception:
-                pass
-        self.index = None
-        self.documents = []
-        self.dimension = None
-
-    def healthcheck(self) -> bool:
-        return self.index is not None or (os.path.exists(f"{self.index_file}.index") and os.path.exists(f"{self.index_file}.docs"))
 
 
 class QdrantManager(VectorDatabaseInterface):
@@ -486,10 +339,6 @@ class VectorDatabaseFactory:
     @staticmethod
     def create_database(db_type: str, **kwargs) -> VectorDatabaseInterface:
         db_type = (db_type or "").lower()
-        if db_type == "chroma":
-            return ChromaDBManager(**kwargs)
-        if db_type == "faiss":
-            return FAISSManager(**kwargs)
         if db_type == "qdrant":
             return QdrantManager(**kwargs)
         if db_type == "pinecone":
