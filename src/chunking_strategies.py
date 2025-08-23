@@ -2,7 +2,7 @@ from typing import List, Dict, Any
 import logging
 import re
 import numpy as np
-import google.generativeai as 
+import google.generativeai as genai
 import streamlit as st
 import os
 logger = logging.getLogger(__name__)
