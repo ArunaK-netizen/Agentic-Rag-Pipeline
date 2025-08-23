@@ -106,7 +106,7 @@ class ChromaDBManager(VectorDatabaseInterface):
         if chromadb is None:
             raise ImportError("ChromaDB not installed")
         load_env_variables()
-        self.persist_directory = persist_directory or st.secrets("CHROMA_PERSIST_DIR", "./chroma_data")
+        self.persist_directory = persist_directory or st.secrets.get("CHROMA_PERSIST_DIR", "./chroma_data")
         os.makedirs(self.persist_directory, exist_ok=True)
         self.client = chromadb.PersistentClient(path=self.persist_directory)
         self.collection = None
@@ -258,12 +258,12 @@ class QdrantManager(VectorDatabaseInterface):
         load_env_variables()
 
         # Resolve configuration from parameters or environment
-        env_url = st.secrets("QDRANT_URL")
-        env_api_key = st.secrets("QDRANT_API_KEY")
-        env_host = st.secrets("QDRANT_HOST", "localhost")
-        env_port = int(st.secrets("QDRANT_PORT", "6333"))
-        env_prefer_grpc = st.secrets("QDRANT_PREFER_GRPC", "").lower()
-        env_grpc_port = int(st.secrets("QDRANT_GRPC_PORT", "6334"))
+        env_url = st.secrets["QDRANT_URL"]
+        env_api_key = st.secrets["QDRANT_API_KEY"]
+        env_host = st.secrets["QDRANT_HOST", "localhost"]
+        env_port = int(st.secrets["QDRANT_PORT", "6333"])
+        env_prefer_grpc = st.secrets["QDRANT_PREFER_GRPC", ""].lower()
+        env_grpc_port = int(st.secrets["QDRANT_GRPC_PORT", "6334"])
 
         resolved_url = url or env_url
         resolved_api_key = api_key or env_api_key
@@ -380,7 +380,7 @@ class PineconeManager(VectorDatabaseInterface):
         if Pinecone is None:
             raise ImportError("Pinecone not installed")
         load_env_variables()
-        api_key = st.secrets("PINECONE_API_KEY")
+        api_key = st.secrets["PINECONE_API_KEY"]
         if not api_key:
             raise ValueError("PINECONE_API_KEY missing")
 
@@ -390,9 +390,9 @@ class PineconeManager(VectorDatabaseInterface):
         self.dimension_default = dimension_default
 
         # Prefer serverless; fall back to pod if explicit
-        self.cloud = cloud or st.secrets("PINECONE_CLOUD")          # "aws" | "gcp" | "azure"
-        self.region = region or st.secrets("PINECONE_REGION")       # "us-west-2" etc.
-        self.pod_env = pod_env or st.secrets("PINECONE_ENVIRONMENT")  # legacy pod env
+        self.cloud = cloud or st.secrets["PINECONE_CLOUD"]          # "aws" | "gcp" | "azure"
+        self.region = region or st.secrets["PINECONE_REGION"]       # "us-west-2" etc.
+        self.pod_env = pod_env or st.secrets["PINECONE_ENVIRONMENT"]  # legacy pod env
         self.pod_spec_size = pod_spec_size
 
         self.index = None
