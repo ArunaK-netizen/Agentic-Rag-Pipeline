@@ -258,12 +258,13 @@ class QdrantManager(VectorDatabaseInterface):
         load_env_variables()
 
         # Resolve configuration from parameters or environment
-        env_url = st.secrets["QDRANT_URL"]
-        env_api_key = st.secrets["QDRANT_API_KEY"]
-        env_host = st.secrets["QDRANT_HOST", "localhost"]
-        env_port = int(st.secrets["QDRANT_PORT", "6333"])
-        env_prefer_grpc = st.secrets["QDRANT_PREFER_GRPC", ""].lower()
-        env_grpc_port = int(st.secrets["QDRANT_GRPC_PORT", "6334"])
+        env_url = st.secrets.get("QDRANT_URL")
+        env_api_key = st.secrets.get("QDRANT_API_KEY")
+        env_host = st.secrets.get("QDRANT_HOST", "localhost")
+        env_port = int(st.secrets.get("QDRANT_PORT", "6333"))
+        env_prefer_grpc = st.secrets.get("QDRANT_PREFER_GRPC", "").lower()
+        env_grpc_port = int(st.secrets.get("QDRANT_GRPC_PORT", "6334"))
+
 
         resolved_url = url or env_url
         resolved_api_key = api_key or env_api_key
