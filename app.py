@@ -72,7 +72,7 @@ def render_sidebar():
     st.sidebar.subheader("Document Source")
     uploaded_files = st.sidebar.file_uploader(
         "Upload PDF files",
-        type=["pdf"],
+        type=["pdf", "py"],
         accept_multiple_files=True,
         help="Upload one or more PDF files to process"
     )
