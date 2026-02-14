@@ -2,16 +2,29 @@ from typing import List, Dict, Any
 import logging
 import re
 import numpy as np
-import google.generativeai as genai
 import streamlit as st
 import os
+
+try:
+    import google.generativeai as genai
+except ImportError:
+    genai = None
+
 logger = logging.getLogger(__name__)
 
 class ChunkingManager:
 
     def __init__(self):
-        genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
-        self.model = genai.embed_content  # Uses Gemini's embedding endpoint
+        if genai is not None:
+            try:
+                genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+                self.model = genai.embed_content
+            except Exception as e:
+                logger.warning(f"Gemini embedding not available: {e}")
+                self.model = None
+        else:
+            logger.warning("google.generativeai not installed; embedding unavailable")
+            self.model = None
 
     def fixed_size_chunking(self, text: str, chunk_size: int = 1000, chunk_overlap: int = 200) -> List[Dict[str, Any]]:
         chunks = []

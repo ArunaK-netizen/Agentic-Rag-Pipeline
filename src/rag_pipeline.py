@@ -11,7 +11,12 @@ from .config import VECTOR_DB_CONFIGS, CHUNKING_STRATEGIES, SEARCH_STRATEGIES
 import os
 import tempfile
 import fitz  
-import google.generativeai
+
+try:
+    import google.generativeai
+except ImportError:
+    google = None
+
 import streamlit as st
 
 logger = logging.getLogger(__name__)
@@ -232,7 +237,10 @@ class RAGPipeline:
             Dict[str, Any]: {"success": True, "answer": ...} or {"error": ...}
         """
         try:
-            api_key = st.secrets["GEMINI_API_KEY"]
+            if google is None or google.generativeai is None:
+                return {"error": "google-generativeai SDK not installed. Install via: pip install google-generativeai"}
+            
+            api_key = st.secrets.get("GEMINI_API_KEY")
             if not api_key:
                 logger.error("GEMINI_API_KEY not found in secrets.")
                 return {"error": "GEMINI_API_KEY not set in secrets."}
