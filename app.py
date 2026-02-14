@@ -9,8 +9,22 @@ from src.rag_pipeline import RAGPipeline
 from src.comparison_table import ComparisonAnalyzer
 from src.config import VECTOR_DB_CONFIGS, CHUNKING_STRATEGIES, SEARCH_STRATEGIES
 
+# Pre-download EasyOCR models to avoid timeout on first use
+@st.cache_resource
+def load_ocr_model():
+    """Pre-cache EasyOCR model to avoid timeout during document processing."""
+    try:
+        import easyocr
+        return easyocr.Reader(['en'], gpu=False)
+    except Exception as e:
+        logger.warning(f"EasyOCR initialization failed: {e}")
+        return None
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Trigger OCR model loading early
+load_ocr_model()
 
 st.set_page_config(
     page_title="RAG Pipeline",
