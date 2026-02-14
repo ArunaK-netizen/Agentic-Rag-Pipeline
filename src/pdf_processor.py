@@ -2,22 +2,80 @@ import os
 import logging
 import PyPDF2
 import fitz  # PyMuPDF
-import pytesseract
+# Lazy import EasyOCR to avoid hard crashes when torchvision/torch binaries are broken
+try:
+    import easyocr  # type: ignore
+    _easyocr_import_error = None
+except Exception as _e:
+    easyocr = None  # type: ignore
+    _easyocr_import_error = _e
 from PIL import Image
 from typing import List, Dict, Any
 
 logger = logging.getLogger(__name__)
 
+# Initialize EasyOCR reader (cached globally for efficiency)
+_ocr_reader = None
+
+def get_ocr_reader():
+    """Get or create the EasyOCR reader instance."""
+    global _ocr_reader
+    if _ocr_reader is None:
+        if easyocr is None:
+            logger.error(f"[ERROR] EasyOCR import failed: {_easyocr_import_error}")
+            return None
+        logger.info("[INFO] Initializing EasyOCR reader...")
+        try:
+            _ocr_reader = easyocr.Reader(['en'], gpu=False)
+        except Exception as e:
+            logger.error(f"[ERROR] Failed to initialize EasyOCR reader: {e}")
+            _ocr_reader = None
+    return _ocr_reader
+
+def _preprocess_image_for_ocr(path_or_image):
+    """Open and preprocess an image for better OCR results.
+
+    Accepts a filesystem path or a PIL Image and returns a PIL Image.
+    Operations: convert to grayscale, upscale small images, increase contrast/sharpness.
+    """
+    from PIL import ImageEnhance
+    if isinstance(path_or_image, str):
+        img = Image.open(path_or_image)
+    else:
+        img = path_or_image
+
+    try:
+        img = img.convert("L")
+    except Exception:
+        img = img.convert("RGB").convert("L")
+
+    # Upscale small images to improve OCR
+    max_width = 2000
+    if img.width < max_width:
+        scale = max_width / max(1, img.width)
+        new_size = (int(img.width * scale), int(img.height * scale))
+        img = img.resize(new_size, Image.LANCZOS)
+
+    # Enhance contrast and sharpness
+    try:
+        img = ImageEnhance.Contrast(img).enhance(1.6)
+        img = ImageEnhance.Sharpness(img).enhance(1.3)
+    except Exception:
+        pass
+
+    return img
 class PDFProcessor:
-    """Handles PDF text extraction and preprocessing, including OCR fallback."""
+    """Handles document text extraction and preprocessing from multiple formats with automatic OCR fallback."""
 
     def __init__(self, enable_ocr: bool = True):
-        self.supported_formats = ['.pdf']
+        # Support multiple document and image formats
+        self.supported_formats = ['.pdf', '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.tiff', '.webp', '.docx', '.doc', '.txt']
+        self.image_formats = ['.png', '.jpg', '.jpeg', '.gif', '.bmp', '.tiff', '.webp']
+        self.ocr_formats = ['.pdf', '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.tiff', '.webp']
         self.enable_ocr = enable_ocr
 
     def extract_text_from_pdf(self, pdf_path: str) -> str:
-        """Try extracting text using PyPDF2; fallback to OCR if result is empty."""
-        print("okahy")
+        """Try extracting text using PyPDF2; fallback to OCR if result is empty or extraction fails."""
         try:
             with open(pdf_path, 'rb') as file:
                 pdf_reader = PyPDF2.PdfReader(file)
@@ -32,9 +90,8 @@ class PDFProcessor:
                             text += f"\n--- Page {page_num + 1} ---\n{page_text}\n"
                     except Exception as e:
                         logger.warning(f"[WARNING] Error extracting text from page {page_num + 1}: {e}")
-                print("I am here iowfeowifioe")
+
                 if not text.strip() and self.enable_ocr:
-                    print("here i am ")
                     logger.info(f"[INFO] No extractable text found in {os.path.basename(pdf_path)}; falling back to OCR.")
                     ocr_text = self.ocr_entire_pdf(pdf_path)
                     logger.debug(f"[DEBUG] OCR fallback extracted {len(ocr_text.strip())} characters")
@@ -45,69 +102,203 @@ class PDFProcessor:
 
         except Exception as e:
             logger.error(f"[ERROR] Error reading PDF file {pdf_path}: {e}")
+            if self.enable_ocr:
+                logger.info(f"[INFO] PDF extraction failed; attempting OCR as fallback for {os.path.basename(pdf_path)}")
+                try:
+                    return self.ocr_entire_pdf(pdf_path)
+                except Exception as ocr_error:
+                    logger.error(f"[ERROR] OCR also failed on {pdf_path}: {ocr_error}")
+                    raise
+            raise
+
+    def extract_text_from_image(self, image_path: str) -> str:
+        """Extract text from image files using EasyOCR with preprocessing.
+
+        Returns a text block (may be empty) but always marks an OCR attempt in logs.
+        """
+        text = ""
+        try:
+            logger.info(f"[INFO] Extracting text from image {os.path.basename(image_path)}")
+
+            # Preprocess image to improve detection on low-quality scans/handwriting
+            pil_img = _preprocess_image_for_ocr(image_path)
+
+            # First try Gemini Vision (if configured) as the preferred path for vision parsing
+            try:
+                from .gemini_vlm import parse_images_with_gemini
+                logger.info(f"[INFO] Attempting Gemini Vision parse for {os.path.basename(image_path)}")
+                gemini_res = parse_images_with_gemini([pil_img])
+                if gemini_res is not None and isinstance(gemini_res, list) and any((s or "").strip() for s in gemini_res):
+                    extracted_text = "\n".join(gemini_res)
+                    char_count = len(extracted_text.strip())
+                    logger.info(f"[SUCCESS] Gemini Vision parsed {char_count} characters from {os.path.basename(image_path)}")
+                    text = f"\n--- Image (VLM) ---\n{extracted_text}\n"
+                    return text
+                else:
+                    logger.info(f"[INFO] Gemini did not return usable text for {os.path.basename(image_path)}; falling back to EasyOCR")
+            except Exception as e:
+                logger.debug(f"[DEBUG] Gemini attempt failed for {os.path.basename(image_path)}: {e}")
+
+            # Fallback to EasyOCR
+            logger.info(f"[INFO] Extracting text from image {os.path.basename(image_path)} using EasyOCR")
+            reader = get_ocr_reader()
+
+            # EasyOCR accepts numpy arrays; convert and run in paragraph mode
+            import numpy as _np
+            img_np = _np.array(pil_img)
+            result = reader.readtext(img_np, detail=1, paragraph=True)
+
+            # Combine all detected text
+            extracted_text = "\n".join([line[1] for line in result if line and len(line) > 1 and line[1].strip()])
+            char_count = len(extracted_text.strip())
+            logger.debug(f"[DEBUG] OCR extracted {char_count} characters from {os.path.basename(image_path)}")
+            text = f"\n--- Image (OCR) ---\n{extracted_text}\n"
+            logger.info(f"[SUCCESS] OCR completed for {os.path.basename(image_path)}: {char_count} characters extracted")
+
+            # Fallback: if EasyOCR found nothing and pytesseract is available, try it
+            if char_count == 0:
+                try:
+                    import pytesseract as _pyt
+                    logger.info(f"[INFO] EasyOCR returned nothing; trying pytesseract fallback for {os.path.basename(image_path)}")
+                    pyt_text = _pyt.image_to_string(pil_img)
+                    if pyt_text and pyt_text.strip():
+                        text = f"\n--- Image (OCR - pytesseract) ---\n{pyt_text}\n"
+                        logger.info(f"[SUCCESS] pytesseract extracted {len(pyt_text.strip())} characters from {os.path.basename(image_path)}")
+                except Exception:
+                    # Ignore fallback errors
+                    pass
+
+        except Exception as e:
+            logger.error(f"[ERROR] OCR failed on image {image_path}: {e}")
+            text = f"\n--- Image (OCR - Failed to Extract) ---\n[OCR processing attempted but no text could be extracted]\n"
+        return text
+
+    def extract_text_from_file(self, file_path: str) -> str:
+        """Generic file extraction with automatic fallback to OCR for any unprocessable format."""
+        _, ext = os.path.splitext(file_path)
+        ext = ext.lower()
+        
+        # Try format-specific extraction
+        if ext == '.pdf':
+            return self.extract_text_from_pdf(file_path)
+        elif ext in self.image_formats:
+            return self.extract_text_from_image(file_path)
+        elif ext in ['.txt']:
+            return self._extract_text_from_txt(file_path)
+        else:
+            # For unsupported formats, attempt OCR if enabled
+            if self.enable_ocr and ext in self.ocr_formats:
+                logger.info(f"[INFO] Attempting OCR for unsupported format {ext}")
+                return self.ocr_entire_pdf(file_path)
+            else:
+                logger.warning(f"[WARNING] Unsupported format {ext} and OCR not available")
+                return ""
+
+    def _extract_text_from_txt(self, txt_path: str) -> str:
+        """Extract text from plain text files."""
+        try:
+            with open(txt_path, 'r', encoding='utf-8') as f:
+                text = f.read()
+            logger.debug(f"[SUCCESS] {os.path.basename(txt_path)}: extracted {len(text.strip())} characters")
+            return text
+        except Exception as e:
+            logger.error(f"[ERROR] Error reading text file {txt_path}: {e}")
+            if self.enable_ocr:
+                logger.info(f"[INFO] Text extraction failed; attempting OCR as fallback for {os.path.basename(txt_path)}")
+                return self.ocr_entire_pdf(txt_path)
             raise
 
     def ocr_entire_pdf(self, pdf_path: str) -> str:
         """Run OCR over the entire PDF using PyMuPDF + Tesseract."""
-        print("I AM HERE")
         text = ""
         try:
             doc = fitz.open(pdf_path)
             for page_num in range(len(doc)):
-                page = doc.load_page(page_num)
-                pix = page.get_pixmap(dpi=300)
-                image = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-                page_text = pytesseract.image_to_string(image)
-                logger.debug(f"[DEBUG] OCR Page {page_num + 1} of {os.path.basename(pdf_path)}: {len(page_text.strip())} chars")
-                text += f"\n--- Page {page_num + 1} (OCR) ---\n{page_text}\n"
+                try:
+                    page = doc.load_page(page_num)
+                    pix = page.get_pixmap(dpi=300)
+                    image = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+                    page_text = pytesseract.image_to_string(image)
+                    logger.debug(f"[DEBUG] OCR Page {page_num + 1} of {os.path.basename(pdf_path)}: {len(page_text.strip())} chars")
+                    text += f"\n--- Page {page_num + 1} (OCR) ---\n{page_text}\n"
+                except Exception as e:
+                    logger.warning(f"[WARNING] OCR failed on page {page_num + 1} of {pdf_path}: {e}")
+                    continue
         except Exception as e:
             logger.error(f"[ERROR] OCR failed on {pdf_path}: {e}")
         return text
 
     def process_uploaded_files(self, uploaded_files) -> List[Dict[str, Any]]:
-        """Process multiple uploaded PDF files."""
+        """Process multiple uploaded files (PDFs, images, documents) with automatic OCR fallback for unprocessable files."""
         documents = []
 
         for uploaded_file in uploaded_files:
-            if uploaded_file.type == "application/pdf":
-                try:
-                    # Save uploaded file temporarily
-                    temp_path = f"temp_{uploaded_file.name}"
-                    with open(temp_path, "wb") as f:
-                        f.write(uploaded_file.read())
+            try:
+                # Save uploaded file temporarily
+                temp_path = f"temp_{uploaded_file.name}"
+                with open(temp_path, "wb") as f:
+                    f.write(uploaded_file.read())
 
-                    logger.info(f"[INFO] Processing {uploaded_file.name}")
+                logger.info(f"[INFO] Processing {uploaded_file.name}")
 
-                    # Extract text
-                    text = self.extract_text_from_pdf(temp_path)
+                # Get file extension
+                _, ext = os.path.splitext(uploaded_file.name)
+                file_type = ext.lower()[1:] if ext else "unknown"  # Remove the dot
 
-                    if not text.strip():
-                        logger.warning(f"[WARNING] Skipped {uploaded_file.name}: no extractable or OCR text")
-                        os.remove(temp_path)
+                # Log dispatch decision before extraction
+                if ext.lower() == '.pdf':
+                    logger.info(f"[INFO] Dispatching {uploaded_file.name} to PDF extractor")
+                elif ext.lower() in self.image_formats:
+                    logger.info(f"[INFO] Dispatching {uploaded_file.name} to Image extractor")
+                elif ext.lower() in ['.txt']:
+                    logger.info(f"[INFO] Dispatching {uploaded_file.name} to Text extractor")
+                else:
+                    logger.info(f"[INFO] Dispatching {uploaded_file.name} to generic extractor (unknown/other)")
+
+                # Extract text (with automatic OCR fallback for unprocessable files)
+                text = self.extract_text_from_file(temp_path)
+
+                # Detect if OCR was used - check for OCR marker in text
+                is_ocr_processed = "(OCR)" in text
+
+                # For OCR-processed files, include them even if text is minimal
+                # For regular extraction, skip if no text found
+                if not text.strip():
+                    if is_ocr_processed:
+                        logger.info(f"[INFO] Including OCR-processed file despite minimal extraction: {uploaded_file.name}")
+                    else:
+                        logger.warning(f"[WARNING] Skipped {uploaded_file.name}: no extractable text")
+                        if os.path.exists(temp_path):
+                            os.remove(temp_path)
                         continue
+                
+                documents.append({
+                    "filename": uploaded_file.name,
+                    "text": text,
+                    "metadata": {
+                        "source": uploaded_file.name,
+                        "file_type": file_type,
+                        "ocr_processed": is_ocr_processed
+                    }
+                })
 
-                    documents.append({
-                        "filename": uploaded_file.name,
-                        "text": text,
-                        "metadata": {
-                            "source": uploaded_file.name,
-                            "file_type": "pdf"
-                        }
-                    })
+                processing_method = "OCR" if is_ocr_processed else "Text Extraction"
+                logger.info(f"[SUCCESS] Processed {uploaded_file.name} ({processing_method}): {len(text.strip())} characters")
 
-                    logger.debug(f"[DONE] Processed {uploaded_file.name}: {len(text.strip())} characters")
-
-                    # Clean up temp file
+                # Clean up temp file
+                if os.path.exists(temp_path):
                     os.remove(temp_path)
 
-                except Exception as e:
-                    logger.error(f"[ERROR] Error processing {uploaded_file.name}: {e}")
-                    continue
+            except Exception as e:
+                logger.error(f"[ERROR] Error processing {uploaded_file.name}: {e}")
+                if temp_path and os.path.exists(temp_path):
+                    os.remove(temp_path)
+                continue
 
         return documents
 
     def validate_file(self, file_path: str) -> bool:
-        """Validate if the file is a supported PDF."""
+        """Validate if the file is a supported format."""
         if not os.path.exists(file_path):
             return False
         _, ext = os.path.splitext(file_path)

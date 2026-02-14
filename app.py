@@ -71,10 +71,10 @@ def render_sidebar():
 
     st.sidebar.subheader("Document Source")
     uploaded_files = st.sidebar.file_uploader(
-        "Upload PDF files",
-        type=["pdf"],
+        "Upload documents",
+        type=["pdf", "png", "jpg", "jpeg", "gif", "bmp", "tiff", "webp", "txt"],
         accept_multiple_files=True,
-        help="Upload one or more PDF files to process"
+        help="Upload PDFs, images, or text files. Unprocessable files will automatically use OCR"
     )
     filenames = []
     total_size_mb = 0
@@ -83,14 +83,14 @@ def render_sidebar():
         for f in uploaded_files:
             filenames.append(f.name)
             total_size_mb += f.size / (1024 * 1024)
-        st.sidebar.success(f"{len(uploaded_files)} PDFs uploaded ({total_size_mb:.2f} MB)")
+        st.sidebar.success(f"{len(uploaded_files)} file(s) uploaded ({total_size_mb:.2f} MB)")
         with st.sidebar.expander("Preview Uploaded Files"):
             for name in filenames[:5]:
                 st.write(f"• {name}")
             if len(filenames) > 5:
                 st.write(f"... and {len(filenames) - 5} more")
     else:
-        st.sidebar.info("No PDF files uploaded yet.")
+        st.sidebar.info("No files uploaded yet.")
 
     st.sidebar.subheader("Chunking Strategy")
     chunking_strategy = st.sidebar.selectbox(
@@ -145,7 +145,7 @@ def process_documents_section(config: Dict[str, Any]):
         col1, col2 = st.columns([2, 1])
         
         with col1:
-            st.info(f"Uploaded {len(config['uploaded_files'])} PDF file(s)")
+            st.info(f"Uploaded {len(config['uploaded_files'])} file(s)")
 
 
         

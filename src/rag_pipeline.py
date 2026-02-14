@@ -49,20 +49,27 @@ class RAGPipeline:
     def process_documents(self, uploaded_files, chunking_strategy: str = "recursive", 
                         **chunking_kwargs) -> Dict[str, Any]:
         start_time = time.time()
-        print(f"[INFO] Starting PDF processing: {len(uploaded_files)} files")
+        print(f"[INFO] Starting document processing: {len(uploaded_files)} files")
+
+        # Use the centralized PDFProcessor which handles multiple formats and OCR/VLM fallbacks
+        try:
+            docs = self.pdf_processor.process_uploaded_files(uploaded_files)
+        except Exception as e:
+            print(f"[ERROR] PDFProcessor failed: {e}")
+            return {"error": str(e)}
 
         processed_documents = []
         skipped_files = []
 
-        for file in uploaded_files:
-            print(f"[INFO] Processing {file.name}")
-            text = self.extract_text_from_pdf(file)
-            if text.strip():
-                processed_documents.append({"text": text, "name": file.name})
-                print(f"[SUCCESS] {file.name}: extracted {len(text)} characters")
+        for d in docs:
+            text = d.get("text", "")
+            name = d.get("filename") or d.get("metadata", {}).get("source", "unknown")
+            if text and text.strip():
+                processed_documents.append({"text": text, "name": name})
+                print(f"[SUCCESS] {name}: extracted {len(text.strip())} characters")
             else:
-                skipped_files.append(file.name)
-                print(f"[WARNING] Skipped {file.name}: no extractable text")
+                skipped_files.append(name)
+                print(f"[WARNING] Skipped {name}: no extractable text")
 
         if not processed_documents:
             print(f"[FAIL] No documents processed. Skipped files: {skipped_files}")
