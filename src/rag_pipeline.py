@@ -13,9 +13,11 @@ import tempfile
 import fitz  
 
 try:
-    import google.generativeai
+    from google import genai
+    from google.genai import types
 except ImportError:
-    google = None
+    genai = None
+    types = None
 
 import streamlit as st
 
@@ -229,22 +231,37 @@ class RAGPipeline:
         
     def generate_answer_with_gemini(self, query: str, search_results: List[Dict[str, Any]]) -> Dict[str, Any]:
         """
-        Generate an answer using Gemini Pro LLM based on retrieved document chunks.
+        Generate an answer using Gemini 2.5 Flash LLM based on retrieved document chunks.
+        Uses the new google-genai SDK.
+        
         Args:
             query (str): The user's question.
             search_results (List[Dict[str, Any]]): Retrieved chunks from the vector database.
+            
         Returns:
             Dict[str, Any]: {"success": True, "answer": ...} or {"error": ...}
         """
         try:
-            if google is None or google.generativeai is None:
-                return {"error": "google-generativeai SDK not installed. Install via: pip install google-generativeai"}
+            # Check SDK availability
+            if genai is None:
+                logger.error("google-genai SDK not installed")
+                return {"error": "Gemini Vision unavailable — google-genai SDK not installed. Install via: pip install google-genai"}
             
-            api_key = st.secrets.get("GEMINI_API_KEY")
+            # Get API key
+            api_key = st.secrets.get("GEMINI_API_KEY") if st else None
             if not api_key:
-                logger.error("GEMINI_API_KEY not found in secrets.")
-                return {"error": "GEMINI_API_KEY not set in secrets."}
-            google.generativeai.configure(api_key=api_key)
+                api_key = os.environ.get("GEMINI_API_KEY")
+            
+            if not api_key:
+                logger.error("GEMINI_API_KEY not found in secrets or environment")
+                return {"error": "GEMINI_API_KEY not set in secrets or environment"}
+            
+            # Initialize client
+            try:
+                client = genai.Client(api_key=api_key)
+            except Exception as e:
+                logger.error(f"Failed to create genai.Client: {e}")
+                return {"error": f"Failed to initialize Gemini client: {e}"}
 
             # Concatenate retrieved document texts
             context = "\n\n".join([chunk.get("text", "") for chunk in search_results if chunk.get("text")])
@@ -257,12 +274,22 @@ class RAGPipeline:
                 "Answer:"
             )
 
-            # Generate answer using Gemini Pro
-            model = google.generativeai.GenerativeModel("gemini-2.5-flash")
-            response = model.generate_content(prompt)
-            answer = response.text if hasattr(response, "text") else str(response)
+            # Generate answer using Gemini 2.5 Flash
+            try:
+                response = client.models.generate_content(
+                    model="gemini-2.5-flash",
+                    contents=[prompt]
+                )
+            except Exception as e:
+                logger.error(f"Gemini API call failed: {e}")
+                return {"error": f"Gemini API error: {e}"}
 
+            # Extract answer text
+            answer = response.text if hasattr(response, "text") else str(response)
+            logger.info(f"Generated answer (len={len(answer.strip())})")
+            
             return {"success": True, "answer": answer.strip()}
+            
         except Exception as e:
-            logger.error(f"Error generating answer with Gemini: {e}")
-            return {"error": str(e)}
+            logger.exception(f"Error generating answer with Gemini: {e}")
+            return {"error": f"Gemini error: {str(e)}"}
