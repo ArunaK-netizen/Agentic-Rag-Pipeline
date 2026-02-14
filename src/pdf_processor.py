@@ -2,13 +2,19 @@ import os
 import logging
 import PyPDF2
 import fitz  # PyMuPDF
-# Lazy import EasyOCR to avoid hard crashes when torchvision/torch binaries are broken
-try:
-    import easyocr  # type: ignore
-    _easyocr_import_error = None
-except Exception as _e:
-    easyocr = None  # type: ignore
-    _easyocr_import_error = _e
+import tempfile
+from .config import ENABLE_LOCAL_OCR
+
+# Lazy import EasyOCR only when local OCR is enabled to avoid unnecessary model downloads
+_easyocr_import_error = None
+easyocr = None
+if ENABLE_LOCAL_OCR:
+    try:
+        import easyocr  # type: ignore
+        _easyocr_import_error = None
+    except Exception as _e:
+        easyocr = None  # type: ignore
+        _easyocr_import_error = _e
 from PIL import Image
 from typing import List, Dict, Any
 
@@ -20,6 +26,10 @@ _ocr_reader = None
 def get_ocr_reader():
     """Get or create the EasyOCR reader instance."""
     global _ocr_reader
+    if not ENABLE_LOCAL_OCR:
+        logger.info("[INFO] Local EasyOCR is disabled via configuration; skipping EasyOCR initialization.")
+        return None
+
     if _ocr_reader is None:
         if easyocr is None:
             logger.error(f"[ERROR] EasyOCR import failed: {_easyocr_import_error}")
@@ -127,9 +137,21 @@ class PDFProcessor:
             try:
                 from .gemini_vlm import parse_images_with_gemini
                 logger.info(f"[INFO] Attempting Gemini Vision parse for {os.path.basename(image_path)}")
-                gemini_res = parse_images_with_gemini([pil_img])
-                if gemini_res is not None and isinstance(gemini_res, list) and any((s or "").strip() for s in gemini_res):
-                    extracted_text = "\n".join(gemini_res)
+
+                # Save the preprocessed PIL image to a temporary file and pass the path to Gemini
+                tmpf = tempfile.NamedTemporaryFile(delete=False, suffix=".jpg")
+                try:
+                    pil_img.save(tmpf.name, format="JPEG")
+                    tmpf.close()
+                    gemini_text = parse_images_with_gemini(tmpf.name)
+                finally:
+                    try:
+                        os.unlink(tmpf.name)
+                    except Exception:
+                        pass
+
+                if gemini_text and gemini_text.strip():
+                    extracted_text = gemini_text
                     char_count = len(extracted_text.strip())
                     logger.info(f"[SUCCESS] Gemini Vision parsed {char_count} characters from {os.path.basename(image_path)}")
                     text = f"\n--- Image (VLM) ---\n{extracted_text}\n"
@@ -140,33 +162,39 @@ class PDFProcessor:
                 logger.debug(f"[DEBUG] Gemini attempt failed for {os.path.basename(image_path)}: {e}")
 
             # Fallback to EasyOCR
-            logger.info(f"[INFO] Extracting text from image {os.path.basename(image_path)} using EasyOCR")
-            reader = get_ocr_reader()
+            if ENABLE_LOCAL_OCR:
+                logger.info(f"[INFO] Extracting text from image {os.path.basename(image_path)} using EasyOCR")
+                reader = get_ocr_reader()
 
-            # EasyOCR accepts numpy arrays; convert and run in paragraph mode
-            import numpy as _np
-            img_np = _np.array(pil_img)
-            result = reader.readtext(img_np, detail=1, paragraph=True)
+                if reader is None:
+                    logger.warning(f"[WARNING] EasyOCR reader unavailable despite ENABLE_LOCAL_OCR=True; skipping to lighter fallback.")
+                else:
+                    # EasyOCR accepts numpy arrays; convert and run in paragraph mode
+                    import numpy as _np
+                    img_np = _np.array(pil_img)
+                    result = reader.readtext(img_np, detail=1, paragraph=True)
 
-            # Combine all detected text
-            extracted_text = "\n".join([line[1] for line in result if line and len(line) > 1 and line[1].strip()])
-            char_count = len(extracted_text.strip())
-            logger.debug(f"[DEBUG] OCR extracted {char_count} characters from {os.path.basename(image_path)}")
-            text = f"\n--- Image (OCR) ---\n{extracted_text}\n"
-            logger.info(f"[SUCCESS] OCR completed for {os.path.basename(image_path)}: {char_count} characters extracted")
+                    # Combine all detected text
+                    extracted_text = "\n".join([line[1] for line in result if line and len(line) > 1 and line[1].strip()])
+                    char_count = len(extracted_text.strip())
+                    logger.debug(f"[DEBUG] OCR extracted {char_count} characters from {os.path.basename(image_path)}")
+                    text = f"\n--- Image (OCR) ---\n{extracted_text}\n"
+                    logger.info(f"[SUCCESS] OCR completed for {os.path.basename(image_path)}: {char_count} characters extracted")
 
-            # Fallback: if EasyOCR found nothing and pytesseract is available, try it
-            if char_count == 0:
-                try:
-                    import pytesseract as _pyt
-                    logger.info(f"[INFO] EasyOCR returned nothing; trying pytesseract fallback for {os.path.basename(image_path)}")
-                    pyt_text = _pyt.image_to_string(pil_img)
-                    if pyt_text and pyt_text.strip():
-                        text = f"\n--- Image (OCR - pytesseract) ---\n{pyt_text}\n"
-                        logger.info(f"[SUCCESS] pytesseract extracted {len(pyt_text.strip())} characters from {os.path.basename(image_path)}")
-                except Exception:
-                    # Ignore fallback errors
-                    pass
+                    # If EasyOCR returned content, return it immediately
+                    if text.strip():
+                        return text
+
+            # Lighter fallback: use pytesseract (no large model downloads)
+            try:
+                import pytesseract as _pyt
+                logger.info(f"[INFO] Using pytesseract fallback for {os.path.basename(image_path)}")
+                pyt_text = _pyt.image_to_string(pil_img)
+                if pyt_text and pyt_text.strip():
+                    text = f"\n--- Image (OCR - pytesseract) ---\n{pyt_text}\n"
+                    logger.info(f"[SUCCESS] pytesseract extracted {len(pyt_text.strip())} characters from {os.path.basename(image_path)}")
+            except Exception as _pyt_e:
+                logger.debug(f"[DEBUG] pytesseract fallback failed: {_pyt_e}")
 
         except Exception as e:
             logger.error(f"[ERROR] OCR failed on image {image_path}: {e}")
@@ -218,7 +246,12 @@ class PDFProcessor:
                     page = doc.load_page(page_num)
                     pix = page.get_pixmap(dpi=300)
                     image = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-                    page_text = pytesseract.image_to_string(image)
+                    try:
+                        import pytesseract as _pyt
+                        page_text = _pyt.image_to_string(image)
+                    except Exception as _pyt_e:
+                        logger.error(f"[ERROR] pytesseract not available for OCR on {pdf_path}: {_pyt_e}")
+                        page_text = ""
                     logger.debug(f"[DEBUG] OCR Page {page_num + 1} of {os.path.basename(pdf_path)}: {len(page_text.strip())} chars")
                     text += f"\n--- Page {page_num + 1} (OCR) ---\n{page_text}\n"
                 except Exception as e:

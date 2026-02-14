@@ -1,7 +1,7 @@
 import os
 import base64
 import logging
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 
 try:
     import streamlit as st
@@ -13,6 +13,13 @@ try:
 except Exception:
     requests = None
 
+try:
+    from google import genai
+    from google.genai import types
+except Exception:
+    genai = None
+    types = None
+
 logger = logging.getLogger(__name__)
 
 
@@ -21,7 +28,6 @@ def _get_api_key() -> Optional[str]:
     if st is not None and hasattr(st, "secrets") and st.secrets is not None:
         return st.secrets.get("GEMINI_API_KEY") or os.environ.get("GEMINI_API_KEY")
     return os.environ.get("GEMINI_API_KEY")
-
 
 def _get_endpoint() -> Optional[str]:
     # Allow users to configure a custom Gemini Vision REST endpoint in secrets
@@ -39,102 +45,116 @@ def _image_to_base64(pil_image) -> str:
     return base64.b64encode(b).decode("utf-8")
 
 
-def parse_images_with_gemini(images: List, prompt: Optional[str] = None, model: Optional[str] = None) -> Optional[List[str]]:
-    """
-    Attempt to parse a list of PIL images using a configured Gemini Vision endpoint or SDK.
+def parse_images_with_gemini(image_path: str) -> str:
+    """Parse a single image file using Gemini Vision via the google.generativeai SDK.
 
-    Returns a list of per-page strings on success, or `None` when Gemini integration is not configured.
-    Behavior:
-      - If the environment provides a `google.generativeai` SDK with a documented image API, prefer it (best-effort).
-      - Otherwise, if `GEMINI_VISION_ENDPOINT` + `GEMINI_API_KEY` are set in `st.secrets` or env, POST a JSON payload
-        with base64-encoded images and the optional prompt to that endpoint and return parsed text if present.
-      - If neither path is configured, return `None` so callers can fallback to EasyOCR.
+    Args:
+        image_path: Path to an image file on disk.
+
+    Returns:
+        Extracted text as a string.
+
+    Raises:
+        EnvironmentError: if `GEMINI_API_KEY` is not set.
+        ImportError: if `google.generativeai` SDK is not installed.
+        RuntimeError: on API or processing failures.
     """
     api_key = _get_api_key()
-    endpoint = _get_endpoint()
-    logger.debug("Gemini VLM: api_key_present=%s endpoint=%s", bool(api_key), bool(endpoint))
+    if not api_key:
+        logger.error("GEMINI_API_KEY is not configured in environment or Streamlit secrets")
+        raise EnvironmentError("GEMINI_API_KEY is not configured. Please set GEMINI_API_KEY in environment or Streamlit secrets.")
 
-    # Try official SDK if available (best-effort; do not hard-fail)
+    if genai is None:
+        logger.error("google-genai SDK not installed or not importable")
+        raise ImportError("google-genai SDK not installed. Install via `pip install google-genai`.")
+
+    model_name = "gemini-2.5-flash"
+
+    # Read image bytes
     try:
-        import google.generativeai as genai
-        logger.info("Gemini SDK detected; attempting SDK-based image helpers")
+        with open(image_path, "rb") as f:
+            img_bytes = f.read()
+    except Exception as e:
+        logger.error("Failed to read image file %s: %s", image_path, e)
+        raise RuntimeError(f"Failed to read image file {image_path}: {e}")
 
-        # Many environments will provide a higher-level image API; we don't assume exact method names.
-        # If the SDK is present but no documented image helper exists in this environment, skip to REST fallback.
+    instruction = "Extract the textual content from the image, preserving layout and line breaks. Return plain text only."
+
+    try:
+        # Create client using the new google-genai SDK
         try:
-            if api_key:
-                genai.configure(api_key=api_key)
-        except Exception:
-            # ignore
-            pass
+            client = genai.Client(api_key=api_key)
+        except Exception as _c_e:
+            logger.error("Failed to create genai.Client: %s", _c_e)
+            raise RuntimeError(f"Failed to initialize genai.Client: {_c_e}")
 
-        # Try a couple of common helper names (best-effort, not guaranteed across SDK versions)
-        for helper_name in ("image_predict", "predict_images", "annotate_images", "vision_predict"):
-            helper = getattr(genai, helper_name, None)
-            if callable(helper):
-                logger.debug("Trying Gemini SDK helper '%s'", helper_name)
-                try:
-                    # Convert images to bytes payloads
-                    b64s = [_image_to_base64(img) for img in images]
-                    payload = {"images": b64s, "prompt": prompt or "Extract text preserving layout"}
-                    resp = helper(payload)
-                    # SDKs vary widely; normalize common shapes
-                    if isinstance(resp, dict):
-                        # try common keys
-                        if "pages" in resp and isinstance(resp["pages"], list):
-                            logger.info("Gemini SDK returned 'pages' structure")
-                            return [p.get("text", "") for p in resp["pages"]]
-                        if "outputs" in resp and isinstance(resp["outputs"], list):
-                            texts = []
-                            for out in resp["outputs"]:
-                                if isinstance(out, dict) and "text" in out:
-                                    texts.append(out["text"])
-                            if texts:
-                                logger.info("Gemini SDK returned 'outputs' structure")
-                                return texts
-                    # Fallback: if helper returned a string, use same string for all pages
-                    if isinstance(resp, str):
-                        logger.info("Gemini SDK returned plain string; applying to all pages")
-                        return [resp] * len(images)
-                except Exception as e:
-                    logger.debug("Gemini SDK image helper '%s' failed: %s", helper_name, e)
+        logger.info("Invoking Gemini Vision via client for %s", image_path)
 
-    except Exception:
-        # SDK not available; move on to REST endpoint attempt
-        pass
+        # Build contents using types.Part.from_bytes() for proper Pydantic validation
+        contents = [
+            "Extract all readable text from this handwritten invoice image. Return only raw text.",
+            types.Part.from_bytes(
+                data=img_bytes,
+                mime_type="image/jpeg"
+            )
+        ]
 
-    # REST endpoint fallback
-    if endpoint and api_key and requests is not None:
-        logger.info("Gemini REST endpoint configured; sending %d images to %s", len(images), endpoint)
+        # Call client.models.generate_content with the specified contents
         try:
-            b64s = [_image_to_base64(img) for img in images]
-            payload = {"images": b64s, "prompt": prompt or "Extract text preserving layout"}
-            headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-            resp = requests.post(endpoint, json=payload, headers=headers, timeout=60)
-            resp.raise_for_status()
-            j = resp.json()
-            # Try to extract per-page texts from common fields
-            if isinstance(j, dict):
-                if "pages" in j and isinstance(j["pages"], list):
-                    return [p.get("text", "") for p in j["pages"]]
-                if "outputs" in j and isinstance(j["outputs"], list):
-                    texts = []
-                    for out in j["outputs"]:
-                        if isinstance(out, dict) and "text" in out:
-                            texts.append(out["text"])
-                    if texts:
-                        return texts
-                # Some endpoints return a single concatenated string
-                if "text" in j and isinstance(j["text"], str):
-                    return [j["text"]] * len(images)
+            response = client.models.generate_content(model=model_name, contents=contents)
+        except Exception as _gen_e:
+            logger.error("Gemini Vision client.models.generate_content failed: %s", _gen_e)
+            raise RuntimeError(f"Gemini Vision client.models.generate_content failed: {_gen_e}")
 
-            # As a last resort, if the endpoint returned plain text
-            if isinstance(resp.text, str) and resp.text.strip():
-                return [resp.text.strip()] * len(images)
+        # Prefer response.text
+        if hasattr(response, "text") and isinstance(response.text, str):
+            logger.info("Gemini returned text for %s (len=%d)", image_path, len(response.text))
+            return response.text
 
-        except Exception as e:
-            logger.warning("Gemini REST call failed: %s", e)
+        # Handle dict-like responses
+        if isinstance(response, dict):
+            if "text" in response and isinstance(response["text"], str):
+                return response["text"]
+            outputs = response.get("outputs") or response.get("candidates") or response.get("pages")
+            if isinstance(outputs, list) and outputs:
+                parts = []
+                for o in outputs:
+                    if isinstance(o, dict):
+                        t = o.get("text") or o.get("content") or o.get("output")
+                        if isinstance(t, str) and t.strip():
+                            parts.append(t.strip())
+                if parts:
+                    return "\n".join(parts)
 
-    # Not configured or failed — caller should fallback to EasyOCR
-    logger.info("Gemini Vision not available or not configured; falling back to local OCR")
-    return None
+        logger.error("Unexpected Gemini response shape: %s", type(response))
+        raise RuntimeError("Gemini Vision returned an unexpected response; unable to extract text")
+
+    except Exception as e:
+        logger.exception("Gemini Vision invocation failed for %s: %s", image_path, e)
+        raise
+
+
+def is_gemini_available() -> Dict[str, Any]:
+    """Return availability status for Gemini Vision integration.
+
+    Returns a dict with keys: `available` (bool) and `reason` (str).
+    Only supports the new google-genai SDK (not google-generativeai or REST endpoints).
+    """
+    api_key = _get_api_key()
+
+    # Check SDK availability
+    if genai is None:
+        msg = "Gemini Vision unavailable — google-genai SDK not installed"
+        logger.warning(msg)
+        return {"available": False, "reason": msg}
+
+    # Check API key
+    if not api_key:
+        msg = "Gemini Vision unavailable — GEMINI_API_KEY not configured"
+        logger.warning(msg)
+        return {"available": False, "reason": msg}
+
+    # Both SDK and API key present
+    msg = "Gemini Vision available via SDK"
+    logger.info(msg)
+    return {"available": True, "reason": msg}

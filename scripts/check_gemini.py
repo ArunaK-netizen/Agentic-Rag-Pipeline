@@ -17,8 +17,12 @@ try:
     except Exception as e:
         print('endpoint exc:', e)
     try:
-        res = m.parse_images_with_gemini([])
-        print('parse_images_with_gemini returned:', res)
+        if len(sys.argv) > 1:
+            path = sys.argv[1]
+            res = m.parse_images_with_gemini(path)
+            print('parse_images_with_gemini returned:', res)
+        else:
+            print('parse_images_with_gemini: provide an image path as argument to test')
     except Exception as e:
         print('parse_images_with_gemini exc:', e)
 except Exception as e:

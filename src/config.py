@@ -89,3 +89,6 @@ DEFAULT_SETTINGS = {
     "embedding_model": "sentence_transformers",
     "top_k": 5
 }
+
+# Control whether local OCR (EasyOCR) is allowed. Set via env var `ENABLE_LOCAL_OCR=1`
+ENABLE_LOCAL_OCR = os.getenv("ENABLE_LOCAL_OCR", "0").lower() in ("1", "true", "yes")

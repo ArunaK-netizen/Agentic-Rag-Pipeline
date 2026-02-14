@@ -7,7 +7,8 @@ from typing import Dict, Any, List
 import io
 from src.rag_pipeline import RAGPipeline
 from src.comparison_table import ComparisonAnalyzer
-from src.config import VECTOR_DB_CONFIGS, CHUNKING_STRATEGIES, SEARCH_STRATEGIES
+from src.config import VECTOR_DB_CONFIGS, CHUNKING_STRATEGIES, SEARCH_STRATEGIES, ENABLE_LOCAL_OCR
+from src.gemini_vlm import is_gemini_available
 
 # Pre-download EasyOCR models to avoid timeout on first use
 @st.cache_resource
@@ -23,14 +24,25 @@ def load_ocr_model():
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Trigger OCR model loading early
-load_ocr_model()
+# Trigger OCR model loading early only when local OCR is enabled
+if ENABLE_LOCAL_OCR:
+    load_ocr_model()
 
 st.set_page_config(
     page_title="RAG Pipeline",
     layout="wide",
     initial_sidebar_state="expanded"
 )
+
+# Show Gemini Vision status in the sidebar
+try:
+    gemini_status = is_gemini_available()
+    if gemini_status.get("available"):
+        st.sidebar.success(f"Gemini Vision: available — {gemini_status.get('reason')}")
+    else:
+        st.sidebar.warning(f"Gemini Vision: unavailable — {gemini_status.get('reason')}")
+except Exception as _e:
+    st.sidebar.info("Gemini Vision: status unknown")
 
 st.markdown("""
 <style>

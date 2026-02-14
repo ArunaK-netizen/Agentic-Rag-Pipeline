@@ -147,16 +147,28 @@ def extract_text_from_images_vlm(images: List, vlm_provider: Optional[str] = Non
     try:
         from .gemini_vlm import parse_images_with_gemini
         logger.info("Attempting Gemini Vision parsing for %d pages", len(images))
-        gemini_result = parse_images_with_gemini(images)
-        if gemini_result is None:
-            logger.info("Gemini did not return a result; falling back to EasyOCR")
+
+        gemini_texts = []
+        for idx, img in enumerate(images):
+            # save each PIL image to a temp file and call Gemini on the file path
+            tmpf = tempfile.NamedTemporaryFile(delete=False, suffix=".jpg")
+            try:
+                img.save(tmpf.name, format="JPEG")
+                tmpf.close()
+                page_text = parse_images_with_gemini(tmpf.name)
+            finally:
+                try:
+                    os.unlink(tmpf.name)
+                except Exception:
+                    pass
+
+            gemini_texts.append(page_text or "")
+
+        if any((s or "").strip() for s in gemini_texts):
+            logger.info("Parsed document using Gemini Vision — %d pages returned", len(gemini_texts))
+            return gemini_texts
         else:
-            # If Gemini returned per-page outputs, use them directly.
-            if isinstance(gemini_result, list) and any((s or "").strip() for s in gemini_result):
-                logger.info("Parsed document using Gemini Vision — %d pages returned", len(gemini_result))
-                return gemini_result
-            else:
-                logger.info("Gemini returned empty/blank output; falling back to EasyOCR")
+            logger.info("Gemini returned empty/blank output; falling back to EasyOCR")
     except Exception as e:
         logger.exception("Gemini integration attempted and failed: %s", e)
 

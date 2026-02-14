@@ -116,6 +116,30 @@ streamlit run app.py
 
 ## Configuration Options
 
+### OCR Runtime Configuration
+- **`ENABLE_LOCAL_OCR`**: Set to `1`, `true`, or `yes` to enable local EasyOCR model usage. Default is disabled to avoid heavy model downloads during deployment. To enable local OCR set the environment variable in your deployment or `.env` file:
+```env
+ENABLE_LOCAL_OCR=1
+```
+
+### Gemini Vision Configuration
+To enable Gemini Vision API (recommended over local OCR in deployments) set one or both of the following:
+
+- `GEMINI_API_KEY` — your Gemini/Google Generative AI API key. Prefer storing this in your deployment secrets or `.streamlit/secrets.toml` for Streamlit Cloud.
+- `GEMINI_VISION_ENDPOINT` — optional custom REST endpoint that accepts JSON payloads with base64 images (used when SDK is not present).
+
+Examples (in your `.env` or deployment settings):
+```env
+GEMINI_API_KEY=sk-...your_key...
+# Optional: custom REST endpoint
+GEMINI_VISION_ENDPOINT=https://your-custom-gemini-endpoint.example.com/v1/vision:analyze
+```
+
+Notes:
+- The app will prefer the `google.generativeai` SDK if installed and the API key is present. Otherwise it will call `GEMINI_VISION_ENDPOINT` if configured.
+- If Gemini is available, local OCR (EasyOCR) is disabled by default unless you set `ENABLE_LOCAL_OCR=1`.
+
+
 ### Chunking Parameters
 - **Chunk Size**: 500-2000 characters
 - **Chunk Overlap**: 0-500 characters
