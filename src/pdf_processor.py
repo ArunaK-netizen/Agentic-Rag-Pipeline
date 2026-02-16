@@ -2,13 +2,19 @@ import os
 import logging
 import PyPDF2
 import fitz  # PyMuPDF
-# Lazy import EasyOCR to avoid hard crashes when torchvision/torch binaries are broken
-try:
-    import easyocr  # type: ignore
-    _easyocr_import_error = None
-except Exception as _e:
-    easyocr = None  # type: ignore
-    _easyocr_import_error = _e
+import re
+from .config import ENABLE_LOCAL_OCR
+
+# Lazy import EasyOCR only when local OCR is enabled to avoid unnecessary model downloads
+_easyocr_import_error = None
+easyocr = None
+if ENABLE_LOCAL_OCR:
+    try:
+        import easyocr  # type: ignore
+        _easyocr_import_error = None
+    except Exception as _e:
+        easyocr = None  # type: ignore
+        _easyocr_import_error = _e
 from PIL import Image
 from typing import List, Dict, Any
 
@@ -17,9 +23,35 @@ logger = logging.getLogger(__name__)
 # Initialize EasyOCR reader (cached globally for efficiency)
 _ocr_reader = None
 
+def _extract_retry_time_from_logs() -> str:
+    """Extract retry time from recent log entries if quota was exceeded."""
+    try:
+        import streamlit as st
+        # Try to extract from any error message in session state
+        if hasattr(st, 'session_state') and 'gemini_quota_msg' in st.session_state:
+            return st.session_state.gemini_quota_msg
+    except:
+        pass
+    return None
+
+def _show_quota_message():
+    """Display quota exceeded message to user if Gemini hit limits."""
+    try:
+        import streamlit as st
+        if hasattr(st, 'session_state') and 'gemini_quota_msg' in st.session_state:
+            msg = st.session_state.gemini_quota_msg
+            st.warning(f"⏳ {msg}")
+            del st.session_state.gemini_quota_msg
+    except:
+        pass
+
 def get_ocr_reader():
     """Get or create the EasyOCR reader instance."""
     global _ocr_reader
+    if not ENABLE_LOCAL_OCR:
+        logger.info("[INFO] Local EasyOCR is disabled via configuration; skipping EasyOCR initialization.")
+        return None
+
     if _ocr_reader is None:
         if easyocr is None:
             logger.error(f"[ERROR] EasyOCR import failed: {_easyocr_import_error}")
@@ -75,41 +107,94 @@ class PDFProcessor:
         self.enable_ocr = enable_ocr
 
     def extract_text_from_pdf(self, pdf_path: str) -> str:
-        """Try extracting text using PyPDF2; fallback to OCR if result is empty or extraction fails."""
+        """Extract text from PDF by converting each page to image and using Gemini VLM (same flow as extract_text_from_image)."""
+        text = ""
+        doc = None
         try:
-            with open(pdf_path, 'rb') as file:
-                pdf_reader = PyPDF2.PdfReader(file)
-                text = ""
-
-                for page_num, page in enumerate(pdf_reader.pages):
+            doc = fitz.open(pdf_path)
+            logger.info(f"[INFO] Processing PDF {os.path.basename(pdf_path)} with Gemini VLM on page images")
+            
+            for page_num in range(len(doc)):
+                try:
+                    page = doc.load_page(page_num)
+                    # Convert page to image (300 DPI for better quality)
+                    pix = page.get_pixmap(dpi=300)
+                    pil_img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+                    
+                    # Preprocess image to improve detection (same as for regular images)
+                    pil_img = _preprocess_image_for_ocr(pil_img)
+                    
+                    # Try Gemini Vision first (with preprocessed PIL image)
                     try:
-                        page_text = page.extract_text()
-                        page_text_len = len(page_text.strip()) if page_text else 0
-                        logger.debug(f"[DEBUG] Page {page_num + 1} of {os.path.basename(pdf_path)}: {page_text_len} chars")
-                        if page_text:
-                            text += f"\n--- Page {page_num + 1} ---\n{page_text}\n"
+                        from .gemini_vlm import parse_images_with_gemini
+                        logger.info(f"[INFO] Attempting Gemini Vision on page {page_num + 1} of {os.path.basename(pdf_path)}")
+                        
+                        # Pass preprocessed PIL image directly to Gemini
+                        gemini_text = parse_images_with_gemini(pil_img, prompt="Extract all text from this image, preserving layout and structure.")
+                        
+                        if gemini_text and gemini_text.strip():
+                            char_count = len(gemini_text.strip())
+                            logger.info(f"[SUCCESS] Gemini Vision extracted {char_count} characters from page {page_num + 1}")
+                            text += f"\n--- Page {page_num + 1} (VLM) ---\n{gemini_text}\n"
+                            continue
+                        else:
+                            logger.info(f"[INFO] Gemini did not return usable text for page {page_num + 1}; trying PyPDF2 fallback")
                     except Exception as e:
-                        logger.warning(f"[WARNING] Error extracting text from page {page_num + 1}: {e}")
-
-                if not text.strip() and self.enable_ocr:
-                    logger.info(f"[INFO] No extractable text found in {os.path.basename(pdf_path)}; falling back to OCR.")
-                    ocr_text = self.ocr_entire_pdf(pdf_path)
-                    logger.debug(f"[DEBUG] OCR fallback extracted {len(ocr_text.strip())} characters")
-                    return ocr_text
-
+                        logger.debug(f"[DEBUG] Gemini attempt failed for page {page_num + 1}: {e}")
+                    
+                    # Fallback to PyPDF2 extraction
+                    try:
+                        with open(pdf_path, 'rb') as file:
+                            pdf_reader = PyPDF2.PdfReader(file)
+                            page_data = pdf_reader.pages[page_num]
+                            pypdf_text = page_data.extract_text()
+                            if pypdf_text and pypdf_text.strip():
+                                char_count = len(pypdf_text.strip())
+                                logger.info(f"[SUCCESS] PyPDF2 extracted {char_count} characters from page {page_num + 1}")
+                                text += f"\n--- Page {page_num + 1} (PyPDF2) ---\n{pypdf_text}\n"
+                                continue
+                    except Exception as e:
+                        logger.debug(f"[DEBUG] PyPDF2 fallback failed for page {page_num + 1}: {e}")
+                    
+                    # Fallback to EasyOCR on the page image
+                    if ENABLE_LOCAL_OCR:
+                        logger.info(f"[INFO] Using EasyOCR on page {page_num + 1} of {os.path.basename(pdf_path)}")
+                        reader = get_ocr_reader()
+                        if reader is not None:
+                            import numpy as _np
+                            img_np = _np.array(pil_img)
+                            result = reader.readtext(img_np, detail=1, paragraph=True)
+                            ocr_text = "\n".join([line[1] for line in result if line and len(line) > 1 and line[1].strip()])
+                            if ocr_text.strip():
+                                char_count = len(ocr_text.strip())
+                                logger.info(f"[SUCCESS] EasyOCR extracted {char_count} characters from page {page_num + 1}")
+                                text += f"\n--- Page {page_num + 1} (OCR) ---\n{ocr_text}\n"
+                                continue
+                    
+                    # If nothing worked for this page, log and continue
+                    logger.warning(f"[WARNING] Could not extract text from page {page_num + 1} of {pdf_path}")
+                    
+                except Exception as e:
+                    logger.warning(f"[WARNING] Error processing page {page_num + 1} of {pdf_path}: {e}")
+                    continue
+            
+            if text.strip():
                 logger.debug(f"[SUCCESS] {os.path.basename(pdf_path)}: extracted {len(text.strip())} characters")
-                return text
-
+            else:
+                logger.warning(f"[WARNING] {os.path.basename(pdf_path)}: no text could be extracted")
+            
+            return text
+            
         except Exception as e:
             logger.error(f"[ERROR] Error reading PDF file {pdf_path}: {e}")
-            if self.enable_ocr:
-                logger.info(f"[INFO] PDF extraction failed; attempting OCR as fallback for {os.path.basename(pdf_path)}")
-                try:
-                    return self.ocr_entire_pdf(pdf_path)
-                except Exception as ocr_error:
-                    logger.error(f"[ERROR] OCR also failed on {pdf_path}: {ocr_error}")
-                    raise
             raise
+        finally:
+            # Ensure PDF document is properly closed to release file locks
+            if doc is not None:
+                try:
+                    doc.close()
+                except Exception as e:
+                    logger.debug(f"[DEBUG] Error closing PDF document: {e}")
 
     def extract_text_from_image(self, image_path: str) -> str:
         """Extract text from image files using EasyOCR with preprocessing.
@@ -127,9 +212,9 @@ class PDFProcessor:
             try:
                 from .gemini_vlm import parse_images_with_gemini
                 logger.info(f"[INFO] Attempting Gemini Vision parse for {os.path.basename(image_path)}")
-                gemini_res = parse_images_with_gemini([pil_img])
-                if gemini_res is not None and isinstance(gemini_res, list) and any((s or "").strip() for s in gemini_res):
-                    extracted_text = "\n".join(gemini_res)
+                gemini_text = parse_images_with_gemini(pil_img, prompt="Extract all text from this image, preserving layout and structure.")
+                if gemini_text and gemini_text.strip():
+                    extracted_text = gemini_text
                     char_count = len(extracted_text.strip())
                     logger.info(f"[SUCCESS] Gemini Vision parsed {char_count} characters from {os.path.basename(image_path)}")
                     text = f"\n--- Image (VLM) ---\n{extracted_text}\n"
@@ -209,17 +294,36 @@ class PDFProcessor:
             raise
 
     def ocr_entire_pdf(self, pdf_path: str) -> str:
-        """Run OCR over the entire PDF using PyMuPDF + Tesseract."""
+        """Run OCR over the entire PDF using PyMuPDF + EasyOCR."""
         text = ""
+        if not ENABLE_LOCAL_OCR:
+            logger.info("[INFO] Local EasyOCR is disabled via configuration; skipping OCR.")
+            return text
+        
         try:
             doc = fitz.open(pdf_path)
+            reader = get_ocr_reader()
+            if reader is None:
+                logger.error("[ERROR] EasyOCR reader not available")
+                return text
+            
+            import numpy as _np
             for page_num in range(len(doc)):
                 try:
                     page = doc.load_page(page_num)
                     pix = page.get_pixmap(dpi=300)
-                    image = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-                    page_text = pytesseract.image_to_string(image)
-                    logger.debug(f"[DEBUG] OCR Page {page_num + 1} of {os.path.basename(pdf_path)}: {len(page_text.strip())} chars")
+                    pil_img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+                    
+                    # Preprocess image for better OCR results (same as extract_text_from_image)
+                    pil_img = _preprocess_image_for_ocr(pil_img)
+                    
+                    # Use EasyOCR for text extraction
+                    img_np = _np.array(pil_img)
+                    result = reader.readtext(img_np, detail=1, paragraph=True)
+                    page_text = "\n".join([line[1] for line in result if line and len(line) > 1 and line[1].strip()])
+                    
+                    char_count = len(page_text.strip())
+                    logger.debug(f"[DEBUG] OCR Page {page_num + 1} of {os.path.basename(pdf_path)}: {char_count} chars")
                     text += f"\n--- Page {page_num + 1} (OCR) ---\n{page_text}\n"
                 except Exception as e:
                     logger.warning(f"[WARNING] OCR failed on page {page_num + 1} of {pdf_path}: {e}")
@@ -257,6 +361,9 @@ class PDFProcessor:
 
                 # Extract text (with automatic OCR fallback for unprocessable files)
                 text = self.extract_text_from_file(temp_path)
+                
+                # Show quota message if Gemini hit limits
+                _show_quota_message()
 
                 # Detect if OCR was used - check for OCR marker in text
                 is_ocr_processed = "(OCR)" in text
@@ -269,7 +376,10 @@ class PDFProcessor:
                     else:
                         logger.warning(f"[WARNING] Skipped {uploaded_file.name}: no extractable text")
                         if os.path.exists(temp_path):
-                            os.remove(temp_path)
+                            try:
+                                os.remove(temp_path)
+                            except Exception as cleanup_error:
+                                logger.warning(f"[WARNING] Could not delete temp file {temp_path}: {cleanup_error}")
                         continue
                 
                 documents.append({
@@ -287,12 +397,18 @@ class PDFProcessor:
 
                 # Clean up temp file
                 if os.path.exists(temp_path):
-                    os.remove(temp_path)
+                    try:
+                        os.remove(temp_path)
+                    except Exception as cleanup_error:
+                        logger.warning(f"[WARNING] Could not delete temp file {temp_path}: {cleanup_error}")
 
             except Exception as e:
                 logger.error(f"[ERROR] Error processing {uploaded_file.name}: {e}")
                 if temp_path and os.path.exists(temp_path):
-                    os.remove(temp_path)
+                    try:
+                        os.remove(temp_path)
+                    except Exception as cleanup_error:
+                        logger.warning(f"[WARNING] Could not delete temp file {temp_path}: {cleanup_error}")
                 continue
 
         return documents

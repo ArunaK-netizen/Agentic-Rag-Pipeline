@@ -1,140 +1,193 @@
 import os
 import base64
 import logging
-from typing import List, Optional
+from typing import List, Optional, Union
+from PIL import Image
+import io
 
 try:
     import streamlit as st
 except Exception:
     st = None
 
-try:
-    import requests
-except Exception:
-    requests = None
-
 logger = logging.getLogger(__name__)
 
 
 def _get_api_key() -> Optional[str]:
-    # Prefer Streamlit secrets, then environment
+    """Get Gemini API key from Streamlit secrets or environment variables."""
     if st is not None and hasattr(st, "secrets") and st.secrets is not None:
-        return st.secrets.get("GEMINI_API_KEY") or os.environ.get("GEMINI_API_KEY")
-    return os.environ.get("GEMINI_API_KEY")
+        key = st.secrets.get("GEMINI_API_KEY")
+        if key:
+            masked_key = key[:10] + "..." + key[-4:] if len(key) > 14 else "***"
+            logger.info(f"[INFO] Using Gemini API key from Streamlit secrets: {masked_key}")
+            return key
+    env_key = os.environ.get("GEMINI_API_KEY")
+    if env_key:
+        masked_key = env_key[:10] + "..." + env_key[-4:] if len(env_key) > 14 else "***"
+        logger.info(f"[INFO] Using Gemini API key from environment: {masked_key}")
+    return env_key
 
 
-def _get_endpoint() -> Optional[str]:
-    # Allow users to configure a custom Gemini Vision REST endpoint in secrets
-    if st is not None and hasattr(st, "secrets") and st.secrets is not None:
-        return st.secrets.get("GEMINI_VISION_ENDPOINT")
-    return os.environ.get("GEMINI_VISION_ENDPOINT")
-
-
-def _image_to_base64(pil_image) -> str:
-    from io import BytesIO
-
-    buf = BytesIO()
+def _image_to_base64(pil_image: Image.Image) -> str:
+    """Convert PIL Image to base64 string."""
+    buf = io.BytesIO()
     pil_image.save(buf, format="JPEG")
     b = buf.getvalue()
     return base64.b64encode(b).decode("utf-8")
 
 
-def parse_images_with_gemini(images: List, prompt: Optional[str] = None, model: Optional[str] = None) -> Optional[List[str]]:
-    """
-    Attempt to parse a list of PIL images using a configured Gemini Vision endpoint or SDK.
+def _load_image_from_path(image_path: str) -> Image.Image:
+    """Load PIL Image from file path."""
+    return Image.open(image_path)
 
-    Returns a list of per-page strings on success, or `None` when Gemini integration is not configured.
-    Behavior:
-      - If the environment provides a `google.generativeai` SDK with a documented image API, prefer it (best-effort).
-      - Otherwise, if `GEMINI_VISION_ENDPOINT` + `GEMINI_API_KEY` are set in `st.secrets` or env, POST a JSON payload
-        with base64-encoded images and the optional prompt to that endpoint and return parsed text if present.
-      - If neither path is configured, return `None` so callers can fallback to EasyOCR.
+
+def parse_images_with_gemini(images: Union[List, str], prompt: Optional[str] = None, model: Optional[str] = None) -> Optional[str]:
+    """
+    Extract text from images using Gemini Vision API (google.generativeai SDK).
+    
+    Args:
+        images: Either a list of PIL Images or a single file path string
+        prompt: Optional custom prompt for text extraction
+        model: Optional model name (defaults to gemini-2.0-flash)
+    
+    Returns:
+        Extracted text as a single string, or None if Gemini is not configured/available
     """
     api_key = _get_api_key()
-    endpoint = _get_endpoint()
-    logger.debug("Gemini VLM: api_key_present=%s endpoint=%s", bool(api_key), bool(endpoint))
-
-    # Try official SDK if available (best-effort; do not hard-fail)
+    
+    if not api_key:
+        logger.info("[INFO] Gemini Vision not available or not configured; falling back to local OCR")
+        return None
+    
     try:
         import google.generativeai as genai
-        logger.info("Gemini SDK detected; attempting SDK-based image helpers")
-
-        # Many environments will provide a higher-level image API; we don't assume exact method names.
-        # If the SDK is present but no documented image helper exists in this environment, skip to REST fallback.
-        try:
-            if api_key:
-                genai.configure(api_key=api_key)
-        except Exception:
-            # ignore
-            pass
-
-        # Try a couple of common helper names (best-effort, not guaranteed across SDK versions)
-        for helper_name in ("image_predict", "predict_images", "annotate_images", "vision_predict"):
-            helper = getattr(genai, helper_name, None)
-            if callable(helper):
-                logger.debug("Trying Gemini SDK helper '%s'", helper_name)
+        logger.info("[INFO] Gemini SDK detected; configuring with API key")
+        genai.configure(api_key=api_key)
+        
+        # Use default model if not specified
+        if model is None:
+            model = "gemini-2.0-flash"
+        
+        # Normalize input: convert single path to list of images, or keep as list of PIL images
+        if isinstance(images, str):
+            # Single file path
+            pil_images = [_load_image_from_path(images)]
+        elif isinstance(images, list):
+            # List of PIL images or paths
+            pil_images = []
+            for img in images:
+                if isinstance(img, str):
+                    pil_images.append(_load_image_from_path(img))
+                else:
+                    # Assume PIL Image
+                    pil_images.append(img)
+        else:
+            # Assume single PIL Image
+            pil_images = [images]
+        
+        logger.info(f"[INFO] Processing {len(pil_images)} image(s) with Gemini Vision model '{model}'")
+        
+        # Initialize the generative model
+        vision_model = genai.GenerativeModel(model)
+        
+        # Prepare the prompt
+        extraction_prompt = prompt or "Extract all text from this image. Preserve the layout and structure as much as possible."
+        
+        # Process images with Gemini
+        all_text = []
+        for idx, pil_img in enumerate(pil_images):
+            try:
+                logger.debug(f"[DEBUG] Processing image {idx + 1}/{len(pil_images)}")
+                
+                # Generate content with vision capabilities
+                response = vision_model.generate_content([extraction_prompt, pil_img])
+                
+                # Extract text from response
+                extracted_text = response.text if response and hasattr(response, 'text') else ""
+                
+                if extracted_text and extracted_text.strip():
+                    all_text.append(extracted_text.strip())
+                    char_count = len(extracted_text.strip())
+                    logger.info(f"[SUCCESS] Gemini Vision extracted {char_count} characters from image {idx + 1}")
+                else:
+                    logger.debug(f"[DEBUG] Gemini Vision returned no text for image {idx + 1}")
+                    
+            except Exception as e:
+                error_str = str(e)
+                # Check for quota exceeded error
+                if "429" in error_str or "quota" in error_str.lower():
+                    retry_match = None
+                    try:
+                        import re
+                        # Extract retry delay in seconds
+                        retry_match = re.search(r'retry in (\d+\.?\d*)\s*s', error_str)
+                    except:
+                        pass
+                    
+                    retry_seconds = int(float(retry_match.group(1))) if retry_match else None
+                    if retry_seconds:
+                        retry_time = retry_seconds
+                        minutes = retry_time // 60
+                        seconds = retry_time % 60
+                        if minutes > 0:
+                            time_str = f"{minutes} minute{'s' if minutes > 1 else ''} and {seconds} second{'s' if seconds != 1 else ''}"
+                        else:
+                            time_str = f"{seconds} second{'s' if seconds != 1 else ''}"
+                        msg = f"Gemini Vision quota exceeded for image {idx + 1}. Please try again in {time_str}."
+                        logger.warning(f"[WARNING] {msg}")
+                        # Store message in Streamlit session state for display to user
+                        try:
+                            if st is not None and hasattr(st, 'session_state'):
+                                st.session_state.gemini_quota_msg = msg
+                        except:
+                            pass
+                    else:
+                        logger.warning(f"[WARNING] Gemini Vision processing failed for image {idx + 1}: {e}")
+                else:
+                    logger.warning(f"[WARNING] Gemini Vision processing failed for image {idx + 1}: {e}")
+                continue
+        
+        if all_text:
+            result = "\n".join(all_text)
+            logger.info(f"[SUCCESS] Gemini Vision completed: {len(result.strip())} total characters extracted")
+            return result
+        else:
+            logger.info("[INFO] Gemini Vision extracted no text from any image")
+            return None
+            
+    except ImportError:
+        logger.error("[ERROR] google.generativeai SDK not installed. Install with: pip install google-generativeai")
+        return None
+    except Exception as e:
+        error_str = str(e)
+        # Check for quota exceeded error at the model level
+        if "429" in error_str or "quota" in error_str.lower():
+            retry_match = None
+            try:
+                import re
+                retry_match = re.search(r'retry in (\d+\.?\d*)\s*s', error_str)
+            except:
+                pass
+            
+            retry_seconds = int(float(retry_match.group(1))) if retry_match else None
+            if retry_seconds:
+                retry_time = retry_seconds
+                minutes = retry_time // 60
+                seconds = retry_time % 60
+                if minutes > 0:
+                    time_str = f"{minutes} minute{'s' if minutes > 1 else ''} and {seconds} second{'s' if seconds != 1 else ''}"
+                else:
+                    time_str = f"{seconds} second{'s' if seconds != 1 else ''}"
+                msg = f"Gemini Vision quota exceeded. Please try again in {time_str}."
+                logger.warning(f"[WARNING] {msg}")
+                # Store message in Streamlit session state for display to user
                 try:
-                    # Convert images to bytes payloads
-                    b64s = [_image_to_base64(img) for img in images]
-                    payload = {"images": b64s, "prompt": prompt or "Extract text preserving layout"}
-                    resp = helper(payload)
-                    # SDKs vary widely; normalize common shapes
-                    if isinstance(resp, dict):
-                        # try common keys
-                        if "pages" in resp and isinstance(resp["pages"], list):
-                            logger.info("Gemini SDK returned 'pages' structure")
-                            return [p.get("text", "") for p in resp["pages"]]
-                        if "outputs" in resp and isinstance(resp["outputs"], list):
-                            texts = []
-                            for out in resp["outputs"]:
-                                if isinstance(out, dict) and "text" in out:
-                                    texts.append(out["text"])
-                            if texts:
-                                logger.info("Gemini SDK returned 'outputs' structure")
-                                return texts
-                    # Fallback: if helper returned a string, use same string for all pages
-                    if isinstance(resp, str):
-                        logger.info("Gemini SDK returned plain string; applying to all pages")
-                        return [resp] * len(images)
-                except Exception as e:
-                    logger.debug("Gemini SDK image helper '%s' failed: %s", helper_name, e)
-
-    except Exception:
-        # SDK not available; move on to REST endpoint attempt
-        pass
-
-    # REST endpoint fallback
-    if endpoint and api_key and requests is not None:
-        logger.info("Gemini REST endpoint configured; sending %d images to %s", len(images), endpoint)
-        try:
-            b64s = [_image_to_base64(img) for img in images]
-            payload = {"images": b64s, "prompt": prompt or "Extract text preserving layout"}
-            headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-            resp = requests.post(endpoint, json=payload, headers=headers, timeout=60)
-            resp.raise_for_status()
-            j = resp.json()
-            # Try to extract per-page texts from common fields
-            if isinstance(j, dict):
-                if "pages" in j and isinstance(j["pages"], list):
-                    return [p.get("text", "") for p in j["pages"]]
-                if "outputs" in j and isinstance(j["outputs"], list):
-                    texts = []
-                    for out in j["outputs"]:
-                        if isinstance(out, dict) and "text" in out:
-                            texts.append(out["text"])
-                    if texts:
-                        return texts
-                # Some endpoints return a single concatenated string
-                if "text" in j and isinstance(j["text"], str):
-                    return [j["text"]] * len(images)
-
-            # As a last resort, if the endpoint returned plain text
-            if isinstance(resp.text, str) and resp.text.strip():
-                return [resp.text.strip()] * len(images)
-
-        except Exception as e:
-            logger.warning("Gemini REST call failed: %s", e)
-
-    # Not configured or failed — caller should fallback to EasyOCR
-    logger.info("Gemini Vision not available or not configured; falling back to local OCR")
-    return None
+                    if st is not None and hasattr(st, 'session_state'):
+                        st.session_state.gemini_quota_msg = msg
+                except:
+                    pass
+            else:
+                logger.error(f"[ERROR] Gemini Vision API call failed: {e}")
+        else:
+            logger.error(f"[ERROR] Gemini Vision API call failed: {e}")
+        return None
