@@ -3,6 +3,9 @@
 import os
 from typing import Dict, Any
 
+# OCR Configuration
+ENABLE_LOCAL_OCR = False
+
 # Vector Database Configurations
 VECTOR_DB_CONFIGS = {
     "qdrant": {

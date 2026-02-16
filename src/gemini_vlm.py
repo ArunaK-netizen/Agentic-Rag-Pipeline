@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 
 def _get_api_key() -> Optional[str]:
-    # Prefer Streamlit secrets, then environment
+    """Get Gemini API key from Streamlit secrets or environment variables."""
     if st is not None and hasattr(st, "secrets") and st.secrets is not None:
         return st.secrets.get("GEMINI_API_KEY") or os.environ.get("GEMINI_API_KEY")
     return os.environ.get("GEMINI_API_KEY")
@@ -36,10 +36,9 @@ def _get_endpoint() -> Optional[str]:
     return os.environ.get("GEMINI_VISION_ENDPOINT")
 
 
-def _image_to_base64(pil_image) -> str:
-    from io import BytesIO
-
-    buf = BytesIO()
+def _image_to_base64(pil_image: Image.Image) -> str:
+    """Convert PIL Image to base64 string."""
+    buf = io.BytesIO()
     pil_image.save(buf, format="JPEG")
     b = buf.getvalue()
     return base64.b64encode(b).decode("utf-8")
