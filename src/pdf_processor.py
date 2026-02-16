@@ -23,9 +23,35 @@ logger = logging.getLogger(__name__)
 # Initialize EasyOCR reader (cached globally for efficiency)
 _ocr_reader = None
 
+def _extract_retry_time_from_logs() -> str:
+    """Extract retry time from recent log entries if quota was exceeded."""
+    try:
+        import streamlit as st
+        # Try to extract from any error message in session state
+        if hasattr(st, 'session_state') and 'gemini_quota_msg' in st.session_state:
+            return st.session_state.gemini_quota_msg
+    except:
+        pass
+    return None
+
+def _show_quota_message():
+    """Display quota exceeded message to user if Gemini hit limits."""
+    try:
+        import streamlit as st
+        if hasattr(st, 'session_state') and 'gemini_quota_msg' in st.session_state:
+            msg = st.session_state.gemini_quota_msg
+            st.warning(f"⏳ {msg}")
+            del st.session_state.gemini_quota_msg
+    except:
+        pass
+
 def get_ocr_reader():
     """Get or create the EasyOCR reader instance."""
     global _ocr_reader
+    if not ENABLE_LOCAL_OCR:
+        logger.info("[INFO] Local EasyOCR is disabled via configuration; skipping EasyOCR initialization.")
+        return None
+
     if not ENABLE_LOCAL_OCR:
         logger.info("[INFO] Local EasyOCR is disabled via configuration; skipping EasyOCR initialization.")
         return None
@@ -289,10 +315,20 @@ class PDFProcessor:
             raise
 
     def ocr_entire_pdf(self, pdf_path: str) -> str:
-        """Run OCR over the entire PDF using PyMuPDF + Tesseract."""
+        """Run OCR over the entire PDF using PyMuPDF + EasyOCR."""
         text = ""
+        if not ENABLE_LOCAL_OCR:
+            logger.info("[INFO] Local EasyOCR is disabled via configuration; skipping OCR.")
+            return text
+        
         try:
             doc = fitz.open(pdf_path)
+            reader = get_ocr_reader()
+            if reader is None:
+                logger.error("[ERROR] EasyOCR reader not available")
+                return text
+            
+            import numpy as _np
             for page_num in range(len(doc)):
                 try:
                     page = doc.load_page(page_num)
@@ -342,6 +378,9 @@ class PDFProcessor:
 
                 # Extract text (with automatic OCR fallback for unprocessable files)
                 text = self.extract_text_from_file(temp_path)
+                
+                # Show quota message if Gemini hit limits
+                _show_quota_message()
 
                 # Detect if OCR was used - check for OCR marker in text
                 is_ocr_processed = "(OCR)" in text
@@ -354,7 +393,10 @@ class PDFProcessor:
                     else:
                         logger.warning(f"[WARNING] Skipped {uploaded_file.name}: no extractable text")
                         if os.path.exists(temp_path):
-                            os.remove(temp_path)
+                            try:
+                                os.remove(temp_path)
+                            except Exception as cleanup_error:
+                                logger.warning(f"[WARNING] Could not delete temp file {temp_path}: {cleanup_error}")
                         continue
                 
                 documents.append({
@@ -372,12 +414,18 @@ class PDFProcessor:
 
                 # Clean up temp file
                 if os.path.exists(temp_path):
-                    os.remove(temp_path)
+                    try:
+                        os.remove(temp_path)
+                    except Exception as cleanup_error:
+                        logger.warning(f"[WARNING] Could not delete temp file {temp_path}: {cleanup_error}")
 
             except Exception as e:
                 logger.error(f"[ERROR] Error processing {uploaded_file.name}: {e}")
                 if temp_path and os.path.exists(temp_path):
-                    os.remove(temp_path)
+                    try:
+                        os.remove(temp_path)
+                    except Exception as cleanup_error:
+                        logger.warning(f"[WARNING] Could not delete temp file {temp_path}: {cleanup_error}")
                 continue
 
         return documents
